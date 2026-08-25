@@ -86,9 +86,9 @@ pub struct Scene {
     // массив инстансов
     pub instances: Vec<Instance>,
     // камера
-    camera_position: Vec3,
-    yaw: f32,   // поворот камеры влево/вправо в градусах
-    pitch: f32, // камера вверх/вниз в градусах
+    pub camera_position: Vec3,
+    pub yaw: f32,   // поворот камеры влево/вправо в градусах
+    pub pitch: f32, // камера вверх/вниз в градусах
 }
 
 impl Scene {
@@ -118,18 +118,17 @@ impl Scene {
         )
         .normalize();
 
-        let right = forward.cross(&Vec3::new(0.0, 1.0, 0.0)).normalize();
-
         // Расчет матрицы Камеры (Она едина для всей сцены)
         let target_pos = self.camera_position + forward;
         let up_vector = Vec3::new(0.0, 1.0, 0.0);
         let view_matrix = Mat4::look_at(self.camera_position, target_pos, up_vector);
 
         // Настройки матрицы перспективы
-        let fov = 60.0;
+        let fov = 120.0;
         let aspect = WIDTH as f32 / HEIGHT as f32;
         let near = 0.1;
         let far = 100.0;
+
         // Сам рассчет матрицы
         let projection_matrix = Mat4::perspective(fov, aspect, near, far);
 

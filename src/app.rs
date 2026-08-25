@@ -1,7 +1,7 @@
 use crate::{
-    math::{Mat4, Vec3},
-    renderer::{HEIGHT, WIDTH, draw_line, project},
-    scene::{Instance, Mesh},
+    math::Vec3,
+    renderer::{HEIGHT, WIDTH},
+    scene::Scene,
 };
 use pixels::{Pixels, SurfaceTexture};
 use std::{sync::Arc, time::Instant};
@@ -17,9 +17,11 @@ use winit::{
 pub struct EngineApp {
     window: Option<Arc<Window>>,
     pixels: Option<Pixels<'static>>,
+
+    // публичная сцена, которую можно настраивать снаружи
+    pub scene: Scene,
     angle: f32,
     last_time: Instant,
-    instances: Vec<Instance>, // инстансы
 
     // флаги зажатых клавиш для перемещения
     key_w: bool,
@@ -32,31 +34,15 @@ pub struct EngineApp {
     key_down: bool,
 }
 
-impl Default for EngineApp {
-    fn default() -> Self {
-        let cube = Mesh::create_cube();
-        let pyramid = Mesh::create_pyramid();
-
-        let mut instances = vec![
-            Instance::new(pyramid.clone(), Vec3::new(0.0, 0.0, 0.0)),
-            Instance::new(cube.clone(), Vec3::new(-2.0, 0.0, -2.0)),
-            Instance::new(cube.clone(), Vec3::new(0.0, -3.0, 0.0)),
-        ];
-
-        instances[0].scale = Vec3::new(0.6, 0.6, 0.6);
-        instances[2].scale = Vec3::new(1.2, 0.8, 1.2);
-
+impl EngineApp {
+    pub fn new() -> Self {
+        // создание пустой сцены
         Self {
             window: None,
             pixels: None,
             angle: 0.0,
             last_time: Instant::now(),
-            instances, // инстансы
-
-            // камера
-            camera_pos: Vec3::new(0.0, 3.0, 7.0),
-            yaw: -90.0,
-            pitch: 0.0,
+            scene: Scene::new(),
 
             // Изначально все кнопки отпущены
             key_w: false,
@@ -76,7 +62,7 @@ impl ApplicationHandler for EngineApp {
     // 1. Это событие срабатывает, когда ОС готова дать нам окно
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attributes = Window::default_attributes()
-            .with_title("дадада бурмалда")
+            .with_title("Rust 3D engine - behappii")
             .with_inner_size(LogicalSize::new(WIDTH, HEIGHT));
 
         let raw_window = event_loop.create_window(window_attributes).unwrap();
@@ -136,10 +122,6 @@ impl ApplicationHandler for EngineApp {
 
                 self.angle += 45.0 * dt; // скорость вращения
 
-                self.instances[0].rotation = Vec3::new(0.0, self.angle, 0.0);
-                self.instances[1].rotation = Vec3::new(15.0, self.angle * 2.0, 20.0);
-                self.instances[2].rotation = Vec3::new(30.0, self.angle, 45.0);
-
                 // Достаем буфер экрана
                 let frame = pixels.frame_mut();
 
@@ -155,9 +137,21 @@ impl ApplicationHandler for EngineApp {
                 let movement_speed = 4.0 * dt;
                 let rotation_speed = 100.0 * dt;
 
+                // Расчет движения камеры на сцене
+                let yaw_rad = self.scene.yaw.to_radians();
+                let pitch_rad = self.scene.pitch.to_radians();
+
+                let forward = Vec3::new(
+                    yaw_rad.cos() * pitch_rad.cos(),
+                    pitch_rad.sin(),
+                    yaw_rad.sin() * pitch_rad.cos(),
+                )
+                .normalize();
+                let right = forward.cross(&Vec3::new(0.0, 1.0, 0.0)).normalize();
+
                 // Проверяем зажатые клавиши и плавно меняем координаты
                 if self.key_w {
-                    self.camera_pos = self.camera_pos
+                    self.scene.camera_position = self.scene.camera_position
                         + Vec3::new(
                             forward.x * movement_speed,
                             forward.y * movement_speed,
@@ -165,7 +159,7 @@ impl ApplicationHandler for EngineApp {
                         );
                 }
                 if self.key_s {
-                    self.camera_pos = self.camera_pos
+                    self.scene.camera_position = self.scene.camera_position
                         - Vec3::new(
                             forward.x * movement_speed,
                             forward.y * movement_speed,
@@ -173,7 +167,7 @@ impl ApplicationHandler for EngineApp {
                         );
                 }
                 if self.key_a {
-                    self.camera_pos = self.camera_pos
+                    self.scene.camera_position = self.scene.camera_position
                         - Vec3::new(
                             right.x * movement_speed,
                             right.y * movement_speed,
@@ -181,7 +175,7 @@ impl ApplicationHandler for EngineApp {
                         );
                 }
                 if self.key_d {
-                    self.camera_pos = self.camera_pos
+                    self.scene.camera_position = self.scene.camera_position
                         + Vec3::new(
                             right.x * movement_speed,
                             right.y * movement_speed,
@@ -191,17 +185,31 @@ impl ApplicationHandler for EngineApp {
 
                 // Поворот камеры стрелочками
                 if self.key_left {
-                    self.yaw -= rotation_speed;
+                    self.scene.yaw -= rotation_speed;
                 }
                 if self.key_right {
-                    self.yaw += rotation_speed;
+                    self.scene.yaw += rotation_speed;
                 }
                 if self.key_up {
-                    self.pitch = (self.pitch + rotation_speed).clamp(-89.0, 89.0);
+                    self.scene.pitch = (self.scene.pitch + rotation_speed).clamp(-89.0, 89.0);
                 }
                 if self.key_down {
-                    self.pitch = (self.pitch - rotation_speed).clamp(-89.0, 89.0);
+                    self.scene.pitch = (self.scene.pitch - rotation_speed).clamp(-89.0, 89.0);
                 }
+
+                // Рендеринг сцены
+                let frame = pixels.frame_mut();
+
+                // Заливка фона кадра
+                for pixel in frame.chunks_exact_mut(4) {
+                    pixel[0] = 20;
+                    pixel[1] = 20;
+                    pixel[2] = 20;
+                    pixel[3] = 255;
+                }
+
+                // Делегируем отрисовку сцены
+                self.scene.draw(frame);
 
                 // Выводим буфер на экран окна
                 if let Err(err) = pixels.render() {
