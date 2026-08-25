@@ -57,6 +57,14 @@ impl std::ops::Sub for Vec3 {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct Vec4 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Mat4 {
     pub cols: [[f32; 4]; 4],
 }
@@ -155,7 +163,7 @@ impl Mat4 {
         Self {
             cols: [
                 [x_axis.x, y_axis.x, z_axis.x, 0.0],
-                [x_axis.y, y_axis.y, z_axis.z, 0.0],
+                [x_axis.y, y_axis.y, z_axis.y, 0.0],
                 [x_axis.z, y_axis.z, z_axis.z, 0.0],
                 [-x_axis.dot(&eye), -y_axis.dot(&eye), -z_axis.dot(&eye), 1.0],
             ],
@@ -170,8 +178,8 @@ impl Mat4 {
         let scale_x = scale_y / aspect_ratio;
 
         // Корректируем коэффициенты под отрицательную ось Z (стандарт OpenGL/LookAt)
-        let remap_z = (far + near) / (far - near);
-        let remap_w = far * near / (far - near);
+        let remap_z = -(far + near) / (far - near);
+        let remap_w = -(2.0 * far * near) / (far - near);
 
         Self {
             cols: [
@@ -185,9 +193,9 @@ impl Mat4 {
 }
 
 impl std::ops::Mul<Vec3> for &Mat4 {
-    type Output = Vec3;
+    type Output = Vec4;
 
-    fn mul(self, vec: Vec3) -> Vec3 {
+    fn mul(self, vec: Vec3) -> Vec4 {
         let c = self.cols;
 
         let w = 1.0;
@@ -197,10 +205,11 @@ impl std::ops::Mul<Vec3> for &Mat4 {
         let res_z = c[0][2] * vec.x + c[1][2] * vec.y + c[2][2] * vec.z + c[3][2] * w;
         let res_w = c[0][3] * vec.x + c[1][3] * vec.y + c[2][3] * vec.z + c[3][3] * w;
 
-        if res_w.abs() > 0.0001 {
-            Vec3::new(res_x / res_w, res_y / res_w, res_z / res_w)
-        } else {
-            Vec3::new(res_x, res_y, res_z)
+        Vec4 {
+            x: res_x,
+            y: res_y,
+            z: res_z,
+            w: res_w,
         }
     }
 }

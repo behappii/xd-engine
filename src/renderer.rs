@@ -1,14 +1,5 @@
-use crate::math::Vec3;
-
 pub const WIDTH: u32 = 800;
 pub const HEIGHT: u32 = 600;
-
-pub fn project(vector: Vec3, width: u32, height: u32) -> (i32, i32) {
-    let screen_x = ((vector.x + 1.0) * 0.5 * width as f32).round() as i32;
-    let screen_y = ((1.0 - vector.y) * 0.5 * height as f32).round() as i32;
-
-    (screen_x, screen_y)
-}
 
 pub fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, frame: &mut [u8]) {
     let dx = (x1 - x0).abs();
@@ -20,7 +11,16 @@ pub fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, frame: &mut [u8]) {
     let mut x = x0;
     let mut y = y0;
 
+    let mut iterations = 0;
+
     loop {
+        iterations += 1;
+
+        if iterations > 10000 {
+            println!("line stuck: ({},{}) -> ({},{})", x0, y0, x1, y1);
+            break;
+        }
+
         if x >= 0 && x < WIDTH as i32 && y >= 0 && y < HEIGHT as i32 {
             let pixel_index = ((y as usize) * (WIDTH as usize) + (x as usize)) * 4;
             frame[pixel_index] = 0; // R

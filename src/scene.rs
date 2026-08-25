@@ -1,7 +1,105 @@
 use crate::{
-    math::{Mat4, Vec3},
-    renderer::{HEIGHT, WIDTH, draw_line, project},
+    math::{Mat4, Vec3, Vec4},
+    renderer::{HEIGHT, WIDTH, draw_line},
 };
+
+// число около нуля для проверок if/else
+pub const EPSILON: f32 = 1e-5;
+
+#[derive(Clone, Copy)]
+pub enum Plane {
+    Left,
+    Right,
+    Bottom,
+    Top,
+    Near,
+    Far,
+}
+
+pub fn plane_distance(v: &Vec4, plane: Plane) -> f32 {
+    match plane {
+        Plane::Left => v.x + v.w,
+        Plane::Right => v.w - v.x,
+
+        Plane::Bottom => v.y + v.w,
+        Plane::Top => v.w - v.y,
+
+        Plane::Near => v.z + v.w,
+        Plane::Far => v.w - v.z,
+    }
+}
+
+pub fn lerp_vec4(a: Vec4, b: Vec4, t: f32) -> Vec4 {
+    Vec4 {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        z: a.z + (b.z - a.z) * t,
+        w: a.w + (b.w - a.w) * t,
+    }
+}
+
+pub fn clip_line_4d(mut v0: Vec4, mut v1: Vec4) -> Option<(Vec4, Vec4)> {
+    let planes = [
+        Plane::Left,
+        Plane::Right,
+        Plane::Bottom,
+        Plane::Top,
+        Plane::Near,
+        Plane::Far,
+    ];
+
+    for plane in planes {
+        let d0 = plane_distance(&v0, plane);
+        let d1 = plane_distance(&v1, plane);
+
+        let inside0 = d0 >= -EPSILON;
+        let inside1 = d1 >= -EPSILON;
+
+        match (inside0, inside1) {
+            (true, true) => {}
+
+            (false, false) => {
+                return None;
+            }
+
+            _ => {
+                let denom = d0 - d1;
+
+                if denom.abs() < EPSILON {
+                    return None;
+                }
+
+                let t = d0 / denom;
+
+                let intersection = lerp_vec4(v0, v1, t);
+
+                if inside0 {
+                    v1 = intersection;
+                } else {
+                    v0 = intersection;
+                }
+            }
+        }
+    }
+
+    Some((v0, v1))
+}
+
+pub fn clip_to_ndc(v: Vec4) -> Vec3 {
+    Vec3 {
+        x: v.x / v.w,
+        y: v.y / v.w,
+        z: v.z / v.w,
+    }
+}
+
+pub fn ndc_to_screen(v: Vec3, width: u32, height: u32) -> (i32, i32) {
+    let x = ((v.x + 1.0) * 0.5 * width as f32).round() as i32;
+
+    let y = ((1.0 - v.y) * 0.5 * height as f32).round() as i32;
+
+    (x, y)
+}
 
 #[derive(Clone, Debug)]
 pub struct Mesh {
@@ -96,7 +194,7 @@ impl Scene {
     pub fn new() -> Self {
         Self {
             instances: Vec::new(),
-            camera_position: Vec3::new(0.0, 2.0, 6.0),
+            camera_position: Vec3::new(0.0, 3.0, 0.0),
             yaw: -90.0,
             pitch: 0.0,
         }
@@ -141,33 +239,48 @@ impl Scene {
 
             let mvp_matrix = &vp_matrix * &model_matrix;
 
+            let mut clip_vertices = vec![
+                Vec4 {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    w: 1.0
+                };
+                instance.mesh.vertices.len()
+            ];
+
             // Проецируем вершины конкретного меша
-            let mut projected = vec![(0, 0); instance.mesh.vertices.len()];
             for (i, &vertex) in instance.mesh.vertices.iter().enumerate() {
-                let transformed = &mvp_matrix * vertex;
-                projected[i] = project(transformed, WIDTH, HEIGHT);
+                clip_vertices[i] = &mvp_matrix * vertex;
             }
 
             // Отрисовываем грани этого меша с отсечением невидимых
             for face in &instance.mesh.faces {
-                let p0 = projected[face[0]];
-                let p1 = projected[face[1]];
-                let p2 = projected[face[2]];
+                let v0_4d = clip_vertices[face[0]];
+                let v1_4d = clip_vertices[face[1]];
+                let v2_4d = clip_vertices[face[2]];
+                let v3_4d = clip_vertices[face[3]];
 
-                let v1_x = (p1.0 - p0.0) as f32;
-                let v1_y = (p1.1 - p0.1) as f32;
-                let v2_x = (p2.0 - p0.0) as f32;
-                let v2_y = (p2.1 - p0.1) as f32;
+                let line_pairs = [
+                    (v0_4d, v1_4d),
+                    (v1_4d, v2_4d),
+                    (v2_4d, v3_4d),
+                    (v3_4d, v0_4d),
+                ];
 
-                let cross_z = v1_x * v2_y - v1_y * v2_x;
+                for &(start, end) in &line_pairs {
+                    // Прогоняем каждое ребро через наш 4D-клиппинг!
+                    if let Some((p_start, p_end)) = clip_line_4d(start, end) {
+                        // Рисуем только выжившую часть линии, идеально обрезанную плоскостями!
+                        let ndc0 = clip_to_ndc(p_start);
+                        let ndc1 = clip_to_ndc(p_end);
 
-                // Наше исправленное условие отсечения
-                if cross_z < 0.0 {
-                    draw_line(p0.0, p0.1, p1.0, p1.1, frame);
-                    draw_line(p1.0, p1.1, p2.0, p2.1, frame);
-                    let p3 = projected[face[3]];
-                    draw_line(p2.0, p2.1, p3.0, p3.1, frame);
-                    draw_line(p3.0, p3.1, p0.0, p0.1, frame);
+                        let p0 = ndc_to_screen(ndc0, WIDTH, HEIGHT);
+
+                        let p1 = ndc_to_screen(ndc1, WIDTH, HEIGHT);
+
+                        draw_line(p0.0, p0.1, p1.0, p1.1, frame);
+                    }
                 }
             }
         }

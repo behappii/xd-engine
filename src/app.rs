@@ -103,9 +103,7 @@ impl ApplicationHandler for EngineApp {
 
                         // Выход по Escape
                         KeyCode::Escape => event_loop.exit(),
-                        _ => {
-                            println!("{}", is_pressed);
-                        }
+                        _ => {}
                     }
                 }
             }
