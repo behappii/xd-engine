@@ -1,4 +1,4 @@
-use crate::{math::Vec4, scene::EPSILON};
+use crate::{config::EPSILON, math::Vec4};
 
 /// Плоскости отсечения
 #[derive(Clone, Copy)]

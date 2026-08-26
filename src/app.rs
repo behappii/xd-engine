@@ -1,8 +1,5 @@
-use crate::{
-    fps_counter::FpsCounter,
-    renderer::{HEIGHT, WIDTH},
-    scene::Scene,
-};
+use crate::config::{CLEAR_COLOR, HEIGHT, WIDTH, WINDOW_TITLE};
+use crate::{fps_counter::FpsCounter, scene::Scene};
 use pixels::{Pixels, SurfaceTexture};
 use std::collections::HashSet;
 use std::{sync::Arc, time::Instant};
@@ -60,7 +57,7 @@ impl ApplicationHandler for EngineApp {
     // Это событие срабатывает, когда ОС готова дать нам окно
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attributes = Window::default_attributes()
-            .with_title("Rust 3D engine - behappii")
+            .with_title(WINDOW_TITLE)
             .with_inner_size(LogicalSize::new(WIDTH, HEIGHT));
 
         let raw_window = event_loop.create_window(window_attributes).unwrap();
@@ -73,6 +70,12 @@ impl ApplicationHandler for EngineApp {
         self.window = Some(window);
         self.pixels = Some(pixels);
         self.last_time = Instant::now();
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     // Обработка системных событий окна (закрытие, перерисовка)
@@ -124,10 +127,10 @@ impl ApplicationHandler for EngineApp {
 
                 // Заливка фона кадра
                 for pixel in frame.chunks_exact_mut(4) {
-                    pixel[0] = 20;
-                    pixel[1] = 20;
-                    pixel[2] = 20;
-                    pixel[3] = 255;
+                    pixel[0] = CLEAR_COLOR[0];
+                    pixel[1] = CLEAR_COLOR[1];
+                    pixel[2] = CLEAR_COLOR[2];
+                    pixel[3] = CLEAR_COLOR[3];
                 }
 
                 // Делегируем отрисовку сцены
@@ -141,11 +144,12 @@ impl ApplicationHandler for EngineApp {
 
                 if self.fps_counter.tick() {
                     println!("FPS = {}", self.fps_counter.fps());
-                    window.set_title(&format!("Rust 3D Engine | FPS: {}", self.fps_counter.fps()));
+                    window.set_title(&format!(
+                        "{} | FPS: {}",
+                        WINDOW_TITLE,
+                        self.fps_counter.fps()
+                    ));
                 }
-
-                // Сразу запрашиваем следующий кадр для бесконечной анимации
-                window.request_redraw();
             }
             _ => {}
         }

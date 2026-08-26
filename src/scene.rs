@@ -1,10 +1,8 @@
 use crate::{
+    config::{DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, HEIGHT, WIDTH},
     math::{Mat4, Vec3, Vec4},
-    renderer::{HEIGHT, WIDTH, draw_triangle_wireframe},
+    renderer::draw_triangle_wireframe,
 };
-
-// число около нуля для проверок if/else
-pub const EPSILON: f32 = 1e-5;
 
 #[derive(Clone, Debug)]
 pub struct Mesh {
@@ -143,13 +141,10 @@ impl Scene {
         let view_matrix = Mat4::look_at(self.camera_position, target_pos, up_vector);
 
         // Настройки матрицы перспективы
-        let fov = 75.0;
         let aspect = WIDTH as f32 / HEIGHT as f32;
-        let near = 0.1;
-        let far = 100.0;
 
         // Сам рассчет матрицы
-        let projection_matrix = Mat4::perspective(fov, aspect, near, far);
+        let projection_matrix = Mat4::perspective(DEFAULT_FOV, aspect, DEFAULT_NEAR, DEFAULT_FAR);
 
         // Объединяем View * Projection один раз для кадра
         let vp_matrix = &projection_matrix * &view_matrix;

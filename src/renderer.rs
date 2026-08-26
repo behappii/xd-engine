@@ -1,10 +1,8 @@
 use crate::{
     clipping::clip_line_4d,
+    config::{HEIGHT, LINE_COLOR, WIDTH},
     math::{Vec3, Vec4},
 };
-
-pub const WIDTH: u32 = 1920;
-pub const HEIGHT: u32 = 1200;
 
 // Perspective Divide
 fn clip_to_ndc(v: Vec4) -> Vec3 {
@@ -65,10 +63,10 @@ fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, frame: &mut [u8]) {
 
         if x >= 0 && x < WIDTH as i32 && y >= 0 && y < HEIGHT as i32 {
             let pixel_index = ((y as usize) * (WIDTH as usize) + (x as usize)) * 4;
-            frame[pixel_index] = 0; // R
-            frame[pixel_index + 1] = 255; // G
-            frame[pixel_index + 2] = 0; // B
-            frame[pixel_index + 3] = 255; // A
+            frame[pixel_index] = LINE_COLOR[0]; // R
+            frame[pixel_index + 1] = LINE_COLOR[1]; // G
+            frame[pixel_index + 2] = LINE_COLOR[2]; // B
+            frame[pixel_index + 3] = LINE_COLOR[3]; // A
         }
 
         if x == x1 && y == y1 {

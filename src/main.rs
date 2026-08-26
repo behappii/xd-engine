@@ -2,12 +2,14 @@ use winit::{event_loop::EventLoop, keyboard::KeyCode};
 
 use crate::{
     app::EngineApp,
+    config::{CAMERA_MOVEMENT_SPEED, CAMERA_ROTATION_SPEED},
     math::Vec3,
     scene::{Instance, Mesh},
 };
 
 mod app;
 mod clipping;
+mod config;
 mod fps_counter;
 mod math;
 mod renderer;
@@ -59,8 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // КАМЕРА
 
         // Задаем скорость в секунду
-        let movement_speed = 4.0 * dt;
-        let rotation_speed = 100.0 * dt;
+        let movement_speed = CAMERA_MOVEMENT_SPEED * dt;
+        let rotation_speed = CAMERA_ROTATION_SPEED * dt;
 
         // Расчет движения камеры на сцене
         let yaw_rad = scene.yaw.to_radians();
@@ -89,6 +91,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if pressed_keys.contains(&KeyCode::KeyD) {
             scene.camera_position = scene.camera_position + right * movement_speed;
+        }
+        // Пробел — летим строго вверх по оси Y
+        if pressed_keys.contains(&KeyCode::Space) {
+            scene.camera_position.y += movement_speed;
+        }
+        // Левый Shift — летим строго вниз по оси Y
+        if pressed_keys.contains(&KeyCode::ShiftLeft) {
+            scene.camera_position.y -= movement_speed;
         }
         if pressed_keys.contains(&KeyCode::KeyH) {
             println!("Hello!");
