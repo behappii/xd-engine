@@ -49,6 +49,13 @@ impl std::ops::Add for Vec3 {
     }
 }
 
+impl std::ops::Mul<f32> for Vec3 {
+    type Output = Self;
+    fn mul(self, num: f32) -> Self {
+        Vec3::new(self.x * num, self.y * num, self.z * num)
+    }
+}
+
 impl std::ops::Sub for Vec3 {
     type Output = Self;
     fn sub(self, other: Self) -> Self {

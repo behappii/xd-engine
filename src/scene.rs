@@ -16,6 +16,7 @@ pub enum Plane {
     Far,
 }
 
+// Расстояние до плоскости
 pub fn plane_distance(v: &Vec4, plane: Plane) -> f32 {
     match plane {
         Plane::Left => v.x + v.w,
@@ -29,6 +30,7 @@ pub fn plane_distance(v: &Vec4, plane: Plane) -> f32 {
     }
 }
 
+// Интерполяция вершины
 pub fn lerp_vec4(a: Vec4, b: Vec4, t: f32) -> Vec4 {
     Vec4 {
         x: a.x + (b.x - a.x) * t,
@@ -38,6 +40,7 @@ pub fn lerp_vec4(a: Vec4, b: Vec4, t: f32) -> Vec4 {
     }
 }
 
+// Клиппинг одной линии
 pub fn clip_line_4d(mut v0: Vec4, mut v1: Vec4) -> Option<(Vec4, Vec4)> {
     let planes = [
         Plane::Left,
@@ -85,6 +88,7 @@ pub fn clip_line_4d(mut v0: Vec4, mut v1: Vec4) -> Option<(Vec4, Vec4)> {
     Some((v0, v1))
 }
 
+// Perspective Divide
 pub fn clip_to_ndc(v: Vec4) -> Vec3 {
     Vec3 {
         x: v.x / v.w,
@@ -93,6 +97,7 @@ pub fn clip_to_ndc(v: Vec4) -> Vec3 {
     }
 }
 
+// Viewport Transform
 pub fn ndc_to_screen(v: Vec3, width: u32, height: u32) -> (i32, i32) {
     let x = ((v.x + 1.0) * 0.5 * width as f32).round() as i32;
 
@@ -222,7 +227,7 @@ impl Scene {
         let view_matrix = Mat4::look_at(self.camera_position, target_pos, up_vector);
 
         // Настройки матрицы перспективы
-        let fov = 120.0;
+        let fov = 75.0;
         let aspect = WIDTH as f32 / HEIGHT as f32;
         let near = 0.1;
         let far = 100.0;
