@@ -7,6 +7,8 @@ use crate::{
 };
 
 mod app;
+mod clipping;
+mod fps_counter;
 mod math;
 mod renderer;
 mod scene;
@@ -49,6 +51,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         scene.instances[0].rotation.y = angle;
         scene.instances[0].position.y = (angle * std::f32::consts::PI / 180.0).sin() * 0.5;
+
+        if scene.instances[2].position.x < 10.0 {
+            scene.instances[2].position.x += 0.1 * dt;
+        }
 
         // КАМЕРА
 

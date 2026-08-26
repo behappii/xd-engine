@@ -1,4 +1,5 @@
 use crate::{
+    fps_counter::FpsCounter,
     renderer::{HEIGHT, WIDTH},
     scene::Scene,
 };
@@ -28,6 +29,8 @@ pub struct EngineApp {
     // HashSet<KeyCode> - для обработки нажатия клавиш (press)
     // f32 - взять dt для независимости обработки кадров от FPS
     update_callback: Option<Box<dyn FnMut(&mut Scene, &HashSet<KeyCode>, f32)>>,
+
+    fps_counter: FpsCounter,
 }
 
 impl EngineApp {
@@ -40,6 +43,7 @@ impl EngineApp {
             scene: Scene::new(),
             pressed_keys: HashSet::new(),
             update_callback: None,
+            fps_counter: FpsCounter::new(),
         }
     }
 
@@ -53,7 +57,7 @@ impl EngineApp {
 
 // Реализуем обязательный обработчик событий winit
 impl ApplicationHandler for EngineApp {
-    // 1. Это событие срабатывает, когда ОС готова дать нам окно
+    // Это событие срабатывает, когда ОС готова дать нам окно
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window_attributes = Window::default_attributes()
             .with_title("Rust 3D engine - behappii")
@@ -133,6 +137,11 @@ impl ApplicationHandler for EngineApp {
                 if let Err(err) = pixels.render() {
                     println!("Ошибка рендеринга: {:?}", err);
                     event_loop.exit();
+                }
+
+                if self.fps_counter.tick() {
+                    println!("FPS = {}", self.fps_counter.fps());
+                    window.set_title(&format!("Rust 3D Engine | FPS: {}", self.fps_counter.fps()));
                 }
 
                 // Сразу запрашиваем следующий кадр для бесконечной анимации

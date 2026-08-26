@@ -1,7 +1,49 @@
-pub const WIDTH: u32 = 800;
-pub const HEIGHT: u32 = 600;
+use crate::{
+    clipping::clip_line_4d,
+    math::{Vec3, Vec4},
+};
 
-pub fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, frame: &mut [u8]) {
+pub const WIDTH: u32 = 1920;
+pub const HEIGHT: u32 = 1200;
+
+// Perspective Divide
+fn clip_to_ndc(v: Vec4) -> Vec3 {
+    Vec3 {
+        x: v.x / v.w,
+        y: v.y / v.w,
+        z: v.z / v.w,
+    }
+}
+
+// Viewport Transform
+fn ndc_to_screen(v: Vec3, width: u32, height: u32) -> (i32, i32) {
+    let x = ((v.x + 1.0) * 0.5 * width as f32).round() as i32;
+
+    let y = ((1.0 - v.y) * 0.5 * height as f32).round() as i32;
+
+    (x, y)
+}
+
+pub fn draw_triangle_wireframe(v0: Vec4, v1: Vec4, v2: Vec4, frame: &mut [u8]) {
+    draw_clipped_egde(v0, v1, frame);
+    draw_clipped_egde(v1, v2, frame);
+    draw_clipped_egde(v2, v0, frame);
+}
+
+fn draw_clipped_egde(start: Vec4, end: Vec4, frame: &mut [u8]) {
+    if let Some((c0, c1)) = clip_line_4d(start, end) {
+        let ndc0 = clip_to_ndc(c0);
+        let ndc1 = clip_to_ndc(c1);
+
+        let p0 = ndc_to_screen(ndc0, WIDTH, HEIGHT);
+
+        let p1 = ndc_to_screen(ndc1, WIDTH, HEIGHT);
+
+        draw_line(p0.0, p0.1, p1.0, p1.1, frame);
+    }
+}
+
+fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, frame: &mut [u8]) {
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
