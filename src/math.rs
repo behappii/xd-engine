@@ -71,6 +71,12 @@ pub struct Vec4 {
     pub w: f32,
 }
 
+impl Vec4 {
+    pub fn to_vec3_dir(self) -> Vec3 {
+        Vec3::new(self.x, self.y, self.z)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Mat4 {
     pub cols: [[f32; 4]; 4],

@@ -27,6 +27,7 @@ pub struct EngineApp {
     // HashSet<KeyCode> - для обработки нажатия клавиш (press)
     // f32 - взять dt для независимости обработки кадров от FPS
     update_callback: Option<Box<dyn FnMut(&mut Scene, &HashSet<KeyCode>, f32)>>,
+    depth_buffer: Vec<f32>,
 
     fps_counter: FpsCounter,
 }
@@ -41,6 +42,7 @@ impl EngineApp {
             scene: Scene::new(),
             pressed_keys: HashSet::new(),
             update_callback: None,
+            depth_buffer: Vec::new(),
             fps_counter: FpsCounter::new(),
         }
     }
@@ -68,6 +70,7 @@ impl ApplicationHandler for EngineApp {
         let surface_texture = SurfaceTexture::new(WIDTH, HEIGHT, window.clone());
         let pixels = Pixels::new(WIDTH, HEIGHT, surface_texture).unwrap();
 
+        self.depth_buffer = vec![0.0; (WIDTH * HEIGHT) as usize];
         self.window = Some(window);
         self.pixels = Some(pixels);
         self.last_time = Instant::now();
@@ -129,8 +132,12 @@ impl ApplicationHandler for EngineApp {
                 // Заливка фона кадра
                 clear_frame(frame, CLEAR_COLOR);
 
+                // 0.0 = бесконечно далеко, так как храним 1/w
+                self.depth_buffer.fill(0.0);
+
                 // Делегируем отрисовку сцены
-                self.scene.draw(frame, WIDTH, HEIGHT);
+                self.scene
+                    .draw(frame, &mut self.depth_buffer, WIDTH, HEIGHT);
 
                 // Выводим буфер на экран окна
                 if let Err(err) = pixels.render() {

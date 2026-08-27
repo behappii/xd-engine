@@ -38,8 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     obj2.scale = Vec3::new(0.6, 0.6, 0.6);
 
     // Легко добавляем третий объект (еще один куб повыше), просто написав одну строчку!
-    let mut obj3 =
-        Instance::new(Rc::clone(&cube), Vec3::new(0.0, 0.5, 0.0)).with_color([255, 255, 255, 255]);
+    let mut obj3 = Instance::new(Rc::clone(&cube), Vec3::new(0.0, 0.5, 0.0))
+        .with_color([255, 255, 255, 255])
+        .as_wireframe();
     obj3.scale = Vec3::new(0.6, 0.6, 0.6);
 
     // Куб с разноцветными гранями: по 2 треугольника на грань,
@@ -95,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for i in 0..23 {
             scene.instances[i].rotation.y = angle + (i as f32);
             scene.instances[i].position.y =
-                (angle * std::f32::consts::PI / 180.0).sin() * ((i * 2) as f32);
+                (angle * std::f32::consts::PI / 180.0).sin() * ((i + 2) as f32);
         }
 
         // КАМЕРА

@@ -1,9 +1,10 @@
 use std::rc::Rc;
 
 use crate::{
+    clipping::clip_triangle_near,
     config::{DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, LINE_COLOR},
     math::{Mat4, Vec3, Vec4},
-    renderer::{DrawContext, draw_triangle_wireframe},
+    renderer::{DrawContext, draw_triangle_filled, draw_triangle_wireframe, is_backface},
 };
 
 #[derive(Clone, Debug)]
@@ -27,23 +28,23 @@ impl Mesh {
             ],
             triangles: vec![
                 // Back (-Z)
-                [0, 1, 2],
-                [0, 2, 3],
+                [0, 2, 1],
+                [0, 3, 2],
                 // Front (+Z)
-                [4, 6, 5],
-                [4, 7, 6],
+                [4, 5, 6],
+                [4, 6, 7],
                 // Bottom (-Y)
-                [0, 5, 1],
-                [0, 4, 5],
+                [0, 1, 5],
+                [0, 5, 4],
                 // Top (+Y)
-                [3, 2, 6],
-                [3, 6, 7],
+                [3, 6, 2],
+                [3, 7, 6],
                 // Left (-X)
-                [0, 3, 7],
-                [0, 7, 4],
+                [0, 7, 3],
+                [0, 4, 7],
                 // Right (+X)
-                [1, 5, 6],
-                [1, 6, 2],
+                [1, 6, 5],
+                [1, 2, 6],
             ],
         }
     }
@@ -82,6 +83,8 @@ pub struct Instance {
     // необязательная раскраска по треугольникам
     // индекс совпадает с mesh.triangles
     pub face_colors: Option<Vec<[u8; 4]>>,
+
+    pub wireframe: bool,
 }
 
 impl Instance {
@@ -93,6 +96,7 @@ impl Instance {
             scale: Vec3::new(1.0, 1.0, 1.0),
             color: LINE_COLOR,
             face_colors: None,
+            wireframe: false,
         }
     }
     /// Задать цвет всему инстансу
@@ -103,6 +107,11 @@ impl Instance {
     /// Раскраска по индексу треугольников
     pub fn with_face_colors(mut self, colors: Vec<[u8; 4]>) -> Self {
         self.face_colors = Some(colors);
+        self
+    }
+
+    pub fn as_wireframe(mut self) -> Self {
+        self.wireframe = true;
         self
     }
 
@@ -143,7 +152,7 @@ impl Scene {
         self.instances.push(instance);
     }
 
-    pub fn draw(&self, frame: &mut [u8], width: u32, height: u32) {
+    pub fn draw(&self, frame: &mut [u8], depth: &mut [f32], width: u32, height: u32) {
         // Рассчитываем текущие векторы направления камеры
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();
@@ -169,7 +178,7 @@ impl Scene {
         // Объединяем View * Projection один раз для кадра
         let vp_matrix = &projection_matrix * &view_matrix;
 
-        let mut ctx = DrawContext::new(frame, width, height, LINE_COLOR);
+        let mut ctx = DrawContext::new(frame, depth, width, height, LINE_COLOR);
 
         let mut clip_vertices: Vec<Vec4> = Vec::new();
 
@@ -187,21 +196,59 @@ impl Scene {
                     .map(|&vertex| &mvp_matrix * vertex),
             );
 
+            // яркость от наклона граней
+            let light_dir = Vec3::new(0.5, 1.0, 0.8).normalize();
+
             // Отрисовываем грани этого меша с отсечением невидимых
             for (i, triangle) in instance.mesh.triangles.iter().enumerate() {
                 let v0 = clip_vertices[triangle[0]];
                 let v1 = clip_vertices[triangle[1]];
                 let v2 = clip_vertices[triangle[2]];
 
+                if is_backface(v0, v1, v2) {
+                    continue; // грань отвернута - пропускаем
+                }
+
+                // цвет грани до освещения
                 // Если раскраски по граням нет (или она короче) — берём цвет объекта
-                ctx.color = instance
+                let base_color = instance
                     .face_colors
                     .as_ref()
-                    .and_then(|face| face.get(i))
+                    .and_then(|fc| fc.get(i))
                     .copied()
                     .unwrap_or(instance.color);
 
-                draw_triangle_wireframe(v0, v1, v2, &mut ctx);
+                // Если включен режим проволочных граней для инстанса
+                if instance.wireframe {
+                    draw_triangle_wireframe(v0, v1, v2, &mut ctx);
+                    continue;
+                }
+
+                // Нормаль грани в мировом пространстве
+                let m = &instance.mesh;
+                let (a, b, c) = (
+                    m.vertices[triangle[0]],
+                    m.vertices[triangle[1]],
+                    m.vertices[triangle[2]],
+                );
+                let n_local = (b - a).cross(&(c - a)).normalize();
+                let n = (&model_matrix * n_local).to_vec3_dir().normalize();
+
+                // 0.25 — фоновая подсветка, чтобы тень не была чёрной
+                let intensity = 0.25 + 0.75 * n.dot(&light_dir).max(0.0);
+
+                ctx.color = [
+                    (base_color[0] as f32 * intensity) as u8,
+                    (base_color[1] as f32 * intensity) as u8,
+                    (base_color[2] as f32 * intensity) as u8,
+                    base_color[3],
+                ];
+
+                // Режем по ближней плоскости и растеризуем осколки
+                let (triangles, n) = clip_triangle_near([v0, v1, v2]);
+                for triangle in &triangles[..n] {
+                    draw_triangle_filled(triangle[0], triangle[1], triangle[2], &mut ctx);
+                }
             }
         }
     }

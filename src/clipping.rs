@@ -82,3 +82,56 @@ pub fn clip_line_4d(mut v0: Vec4, mut v1: Vec4) -> Option<(Vec4, Vec4)> {
 
     Some((v0, v1))
 }
+
+pub fn clip_triangle_near(triangle: [Vec4; 3]) -> ([[Vec4; 3]; 2], usize) {
+    let zero = Vec4 {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        w: 0.0,
+    };
+
+    // Алгоритм Сазерленда — Ходжмана: обходим рёбра, копим вершины внутри
+    let mut poly = [zero; 4];
+    let mut count = 0usize;
+
+    for i in 0..3 {
+        let cur = triangle[i];
+        let next = triangle[(i + 1) % 3];
+
+        let d_cur = plane_distance(&cur, Plane::Near);
+        let d_next = plane_distance(&next, Plane::Near);
+
+        let inside_cur = d_cur >= 0.0;
+        let inside_next = d_next >= 0.0;
+
+        if inside_cur {
+            poly[count] = cur;
+            count += 1;
+        }
+
+        // Ребро пересекает плоскость — добавляем точку пересечения
+        if inside_cur != inside_next {
+            let denom = d_cur - d_next;
+            if denom.abs() > EPSILON {
+                poly[count] = lerp_vec4(cur, next, d_cur / denom);
+                count += 1;
+            }
+        }
+    }
+
+    let mut out = [[zero; 3]; 2];
+
+    match count {
+        3 => {
+            out[0] = [poly[0], poly[1], poly[2]];
+            (out, 1)
+        }
+        4 => {
+            out[0] = [poly[0], poly[1], poly[2]];
+            out[1] = [poly[0], poly[2], poly[3]];
+            (out, 2)
+        }
+        _ => (out, 0),
+    }
+}
