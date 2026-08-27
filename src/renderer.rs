@@ -1,6 +1,6 @@
 use crate::{
     clipping::clip_line_4d,
-    config::{HEIGHT, LINE_COLOR, WIDTH},
+    config::{HEIGHT, WIDTH},
     math::{Vec3, Vec4},
 };
 
@@ -22,13 +22,13 @@ fn ndc_to_screen(v: Vec3, width: u32, height: u32) -> (i32, i32) {
     (x, y)
 }
 
-pub fn draw_triangle_wireframe(v0: Vec4, v1: Vec4, v2: Vec4, frame: &mut [u8]) {
-    draw_clipped_egde(v0, v1, frame);
-    draw_clipped_egde(v1, v2, frame);
-    draw_clipped_egde(v2, v0, frame);
+pub fn draw_triangle_wireframe(v0: Vec4, v1: Vec4, v2: Vec4, color: [u8; 4], frame: &mut [u8]) {
+    draw_clipped_egde(v0, v1, color, frame);
+    draw_clipped_egde(v1, v2, color, frame);
+    draw_clipped_egde(v2, v0, color, frame);
 }
 
-fn draw_clipped_egde(start: Vec4, end: Vec4, frame: &mut [u8]) {
+fn draw_clipped_egde(start: Vec4, end: Vec4, color: [u8; 4], frame: &mut [u8]) {
     if let Some((c0, c1)) = clip_line_4d(start, end) {
         let ndc0 = clip_to_ndc(c0);
         let ndc1 = clip_to_ndc(c1);
@@ -37,11 +37,11 @@ fn draw_clipped_egde(start: Vec4, end: Vec4, frame: &mut [u8]) {
 
         let p1 = ndc_to_screen(ndc1, WIDTH, HEIGHT);
 
-        draw_line(p0.0, p0.1, p1.0, p1.1, frame);
+        draw_line(p0.0, p0.1, p1.0, p1.1, color, frame);
     }
 }
 
-fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, frame: &mut [u8]) {
+fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: [u8; 4], frame: &mut [u8]) {
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
@@ -63,10 +63,7 @@ fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, frame: &mut [u8]) {
 
         if x >= 0 && x < WIDTH as i32 && y >= 0 && y < HEIGHT as i32 {
             let pixel_index = ((y as usize) * (WIDTH as usize) + (x as usize)) * 4;
-            frame[pixel_index] = LINE_COLOR[0]; // R
-            frame[pixel_index + 1] = LINE_COLOR[1]; // G
-            frame[pixel_index + 2] = LINE_COLOR[2]; // B
-            frame[pixel_index + 3] = LINE_COLOR[3]; // A
+            frame[pixel_index..pixel_index + 4].copy_from_slice(&color);
         }
 
         if x == x1 && y == y1 {

@@ -27,14 +27,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pyramid = Mesh::create_pyramid();
 
     // Создаем инстансы
-    let mut obj1 = Instance::new(cube, Vec3::new(-1.8, 0.0, 0.0));
-    obj1.scale = Vec3::new(1.2, 1.2, 1.2);
+    let mut obj1 = Instance::new(cube, Vec3::new(-3.0, 0.7, 0.0)).with_color([255, 255, 255, 255]);
+    obj1.scale = Vec3::new(0.6, 0.6, 0.6);
 
-    let mut obj2 = Instance::new(pyramid, Vec3::new(1.8, 0.0, 0.0));
-    obj2.scale = Vec3::new(1.4, 1.4, 1.4);
+    let mut obj2 =
+        Instance::new(pyramid, Vec3::new(-1.5, 0.3, 0.0)).with_color([255, 255, 255, 255]);
+    obj2.scale = Vec3::new(0.6, 0.6, 0.6);
 
     // Легко добавляем третий объект (еще один куб повыше), просто написав одну строчку!
-    let mut obj3 = Instance::new(Mesh::create_cube(), Vec3::new(0.0, 1.5, -1.0));
+    let mut obj3 = Instance::new(Mesh::create_cube(), Vec3::new(0.0, 0.5, 0.0))
+        .with_color([255, 255, 255, 255]);
     obj3.scale = Vec3::new(0.6, 0.6, 0.6);
 
     // Закидываем инстансы в сцену движка
@@ -53,10 +55,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         scene.instances[0].rotation.y = angle;
         scene.instances[0].position.y = (angle * std::f32::consts::PI / 180.0).sin() * 0.5;
-
-        if scene.instances[2].position.x < 10.0 {
-            scene.instances[2].position.x += 0.1 * dt;
-        }
 
         // КАМЕРА
 

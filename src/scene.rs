@@ -1,5 +1,5 @@
 use crate::{
-    config::{DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, HEIGHT, WIDTH},
+    config::{DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, HEIGHT, LINE_COLOR, WIDTH},
     math::{Mat4, Vec3, Vec4},
     renderer::draw_triangle_wireframe,
 };
@@ -74,6 +74,7 @@ pub struct Instance {
     pub position: Vec3,
     pub rotation: Vec3,
     pub scale: Vec3,
+    pub color: [u8; 4], // R G B A
 }
 
 impl Instance {
@@ -83,7 +84,13 @@ impl Instance {
             position,
             rotation: Vec3::new(0.0, 0.0, 0.0),
             scale: Vec3::new(1.0, 1.0, 1.0),
+            color: LINE_COLOR,
         }
+    }
+
+    pub fn with_color(mut self, color: [u8; 4]) -> Self {
+        self.color = color;
+        self
     }
 
     pub fn get_model_matrix(&self) -> Mat4 {
@@ -176,7 +183,7 @@ impl Scene {
                 let v1 = clip_vertices[triangle[1]];
                 let v2 = clip_vertices[triangle[2]];
 
-                draw_triangle_wireframe(v0, v1, v2, frame);
+                draw_triangle_wireframe(v0, v1, v2, instance.color, frame);
             }
         }
     }

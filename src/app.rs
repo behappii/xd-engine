@@ -143,7 +143,6 @@ impl ApplicationHandler for EngineApp {
                 }
 
                 if self.fps_counter.tick() {
-                    println!("FPS = {}", self.fps_counter.fps());
                     window.set_title(&format!(
                         "{} | FPS: {}",
                         WINDOW_TITLE,
