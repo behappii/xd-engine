@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use winit::{event_loop::EventLoop, keyboard::KeyCode};
 
 use crate::{
@@ -23,11 +25,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = EngineApp::new();
 
     // Генерируем меши
-    let cube = Mesh::create_cube();
-    let pyramid = Mesh::create_pyramid();
+    let cube = Rc::new(Mesh::create_cube());
+    let pyramid = Rc::new(Mesh::create_pyramid());
 
     // Создаем инстансы
-    let mut obj1 = Instance::new(cube, Vec3::new(-3.0, 0.7, 0.0)).with_color([255, 255, 255, 255]);
+    let mut obj1 =
+        Instance::new(Rc::clone(&cube), Vec3::new(-3.0, 0.7, 0.0)).with_color([255, 255, 255, 255]);
     obj1.scale = Vec3::new(0.6, 0.6, 0.6);
 
     let mut obj2 =
@@ -35,14 +38,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     obj2.scale = Vec3::new(0.6, 0.6, 0.6);
 
     // Легко добавляем третий объект (еще один куб повыше), просто написав одну строчку!
-    let mut obj3 = Instance::new(Mesh::create_cube(), Vec3::new(0.0, 0.5, 0.0))
-        .with_color([255, 255, 255, 255]);
+    let mut obj3 =
+        Instance::new(Rc::clone(&cube), Vec3::new(0.0, 0.5, 0.0)).with_color([255, 255, 255, 255]);
     obj3.scale = Vec3::new(0.6, 0.6, 0.6);
+
+    // Куб с разноцветными гранями: по 2 треугольника на грань,
+    // порядок как в create_cube — back, front, bottom, top, left, right
+    let mut obj4 =
+        Instance::new(Mesh::create_cube(), Vec3::new(0.0, 1.5, -1.0)).with_face_colors(vec![
+            [255, 80, 80, 255],
+            [255, 80, 80, 255], // back
+            [80, 255, 80, 255],
+            [80, 255, 80, 255], // front
+            [80, 80, 255, 255],
+            [80, 80, 255, 255], // bottom
+            [255, 255, 80, 255],
+            [255, 255, 80, 255], // top
+            [255, 80, 255, 255],
+            [255, 80, 255, 255], // left
+            [80, 255, 255, 255],
+            [80, 255, 255, 255], // right
+        ]);
+    obj4.scale = Vec3::new(0.6, 0.6, 0.6);
+
+    for i in 0..20 {
+        let angle = i as f32 * 18.0_f32.to_radians();
+        let mut cube_ring = Instance::new(
+            Rc::clone(&cube),
+            Vec3::new(angle.cos() * 6.0, -2.0, angle.sin() * 6.0),
+        )
+        .with_color([200, 200, 60, 255]);
+        cube_ring.scale = Vec3::new(0.3, 0.3, 0.3);
+        app.scene.add_instance(cube_ring);
+    }
 
     // Закидываем инстансы в сцену движка
     app.scene.add_instance(obj1);
     app.scene.add_instance(obj2);
     app.scene.add_instance(obj3);
+    app.scene.add_instance(obj4);
+
+    let mesh = Rc::make_mut(&mut app.scene.instances[0].mesh);
+    mesh.vertices[0].y -= 1.0;
+    mesh.vertices[1].x += 2.0;
+    mesh.vertices[5].z += 4.0;
 
     // создаем переменную, которую будем изменять в цикле обновления
     let mut angle: f32 = 0.0;
@@ -53,8 +92,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         angle += 45.0 * dt;
 
-        scene.instances[0].rotation.y = angle;
-        scene.instances[0].position.y = (angle * std::f32::consts::PI / 180.0).sin() * 0.5;
+        for i in 0..23 {
+            scene.instances[i].rotation.y = angle + (i as f32);
+            scene.instances[i].position.y =
+                (angle * std::f32::consts::PI / 180.0).sin() * ((i * 2) as f32);
+        }
 
         // КАМЕРА
 

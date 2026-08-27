@@ -1,7 +1,9 @@
+use std::rc::Rc;
+
 use crate::{
-    config::{DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, HEIGHT, LINE_COLOR, WIDTH},
+    config::{DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, LINE_COLOR},
     math::{Mat4, Vec3, Vec4},
-    renderer::draw_triangle_wireframe,
+    renderer::{DrawContext, draw_triangle_wireframe},
 };
 
 #[derive(Clone, Debug)]
@@ -70,26 +72,37 @@ impl Mesh {
 }
 
 pub struct Instance {
-    pub mesh: Mesh,
+    pub mesh: Rc<Mesh>,
     pub position: Vec3,
     pub rotation: Vec3,
     pub scale: Vec3,
+
+    // цвет всего объекта
     pub color: [u8; 4], // R G B A
+    // необязательная раскраска по треугольникам
+    // индекс совпадает с mesh.triangles
+    pub face_colors: Option<Vec<[u8; 4]>>,
 }
 
 impl Instance {
-    pub fn new(mesh: Mesh, position: Vec3) -> Self {
+    pub fn new(mesh: impl Into<Rc<Mesh>>, position: Vec3) -> Self {
         Self {
-            mesh,
+            mesh: mesh.into(),
             position,
             rotation: Vec3::new(0.0, 0.0, 0.0),
             scale: Vec3::new(1.0, 1.0, 1.0),
             color: LINE_COLOR,
+            face_colors: None,
         }
     }
-
+    /// Задать цвет всему инстансу
     pub fn with_color(mut self, color: [u8; 4]) -> Self {
         self.color = color;
+        self
+    }
+    /// Раскраска по индексу треугольников
+    pub fn with_face_colors(mut self, colors: Vec<[u8; 4]>) -> Self {
+        self.face_colors = Some(colors);
         self
     }
 
@@ -130,7 +143,7 @@ impl Scene {
         self.instances.push(instance);
     }
 
-    pub fn draw(&self, frame: &mut [u8]) {
+    pub fn draw(&self, frame: &mut [u8], width: u32, height: u32) {
         // Рассчитываем текущие векторы направления камеры
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();
@@ -142,48 +155,53 @@ impl Scene {
         )
         .normalize();
 
-        // Расчет матрицы Камеры (Она едина для всей сцены)
+        // Расчет матрицы Вида (Она едина для всей сцены)
         let target_pos = self.camera_position + forward;
         let up_vector = Vec3::new(0.0, 1.0, 0.0);
         let view_matrix = Mat4::look_at(self.camera_position, target_pos, up_vector);
 
-        // Настройки матрицы перспективы
-        let aspect = WIDTH as f32 / HEIGHT as f32;
+        // отношение ширина:высота экрана
+        let aspect = width as f32 / height as f32;
 
-        // Сам рассчет матрицы
+        // Рассчет матрицы проекции на экран
         let projection_matrix = Mat4::perspective(DEFAULT_FOV, aspect, DEFAULT_NEAR, DEFAULT_FAR);
 
         // Объединяем View * Projection один раз для кадра
         let vp_matrix = &projection_matrix * &view_matrix;
 
+        let mut ctx = DrawContext::new(frame, width, height, LINE_COLOR);
+
+        let mut clip_vertices: Vec<Vec4> = Vec::new();
+
         // Рендеринг каждого инстанса сцены
         for instance in &self.instances {
             let model_matrix = instance.get_model_matrix();
-
             let mvp_matrix = &vp_matrix * &model_matrix;
 
-            let mut clip_vertices = vec![
-                Vec4 {
-                    x: 0.0,
-                    y: 0.0,
-                    z: 0.0,
-                    w: 1.0
-                };
-                instance.mesh.vertices.len()
-            ];
-
-            // Проецируем вершины конкретного меша
-            for (i, &vertex) in instance.mesh.vertices.iter().enumerate() {
-                clip_vertices[i] = &mvp_matrix * vertex;
-            }
+            clip_vertices.clear();
+            clip_vertices.extend(
+                instance
+                    .mesh
+                    .vertices
+                    .iter()
+                    .map(|&vertex| &mvp_matrix * vertex),
+            );
 
             // Отрисовываем грани этого меша с отсечением невидимых
-            for triangle in &instance.mesh.triangles {
+            for (i, triangle) in instance.mesh.triangles.iter().enumerate() {
                 let v0 = clip_vertices[triangle[0]];
                 let v1 = clip_vertices[triangle[1]];
                 let v2 = clip_vertices[triangle[2]];
 
-                draw_triangle_wireframe(v0, v1, v2, instance.color, frame);
+                // Если раскраски по граням нет (или она короче) — берём цвет объекта
+                ctx.color = instance
+                    .face_colors
+                    .as_ref()
+                    .and_then(|face| face.get(i))
+                    .copied()
+                    .unwrap_or(instance.color);
+
+                draw_triangle_wireframe(v0, v1, v2, &mut ctx);
             }
         }
     }

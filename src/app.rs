@@ -1,4 +1,5 @@
 use crate::config::{CLEAR_COLOR, HEIGHT, WIDTH, WINDOW_TITLE};
+use crate::renderer::clear_frame;
 use crate::{fps_counter::FpsCounter, scene::Scene};
 use pixels::{Pixels, SurfaceTexture};
 use std::collections::HashSet;
@@ -126,15 +127,10 @@ impl ApplicationHandler for EngineApp {
                 let frame = pixels.frame_mut();
 
                 // Заливка фона кадра
-                for pixel in frame.chunks_exact_mut(4) {
-                    pixel[0] = CLEAR_COLOR[0];
-                    pixel[1] = CLEAR_COLOR[1];
-                    pixel[2] = CLEAR_COLOR[2];
-                    pixel[3] = CLEAR_COLOR[3];
-                }
+                clear_frame(frame, CLEAR_COLOR);
 
                 // Делегируем отрисовку сцены
-                self.scene.draw(frame);
+                self.scene.draw(frame, WIDTH, HEIGHT);
 
                 // Выводим буфер на экран окна
                 if let Err(err) = pixels.render() {
