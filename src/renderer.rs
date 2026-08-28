@@ -4,11 +4,35 @@ use crate::{
     math::{Vec3, Vec4},
 };
 
+/// Вершина на входе растеризатора: позиция в clip space плюс всё, что нужно
+/// протянуть по треугольнику с интерполяцией.
+///
+/// Отдельный тип от `scene::Vertex`: там сырые атрибуты меша в локальных
+/// координатах, здесь — уже обработанные, готовые к растеризации. Пара
+/// «вершинный этап -> фрагментный этап» ровно та же, что в шейдерном
+/// пайплайне на GPU, а `color` здесь — это varying.
+#[derive(Debug, Clone, Copy)]
+pub struct ShadedVertex {
+    pub clip_position: Vec4,
+    /// Цвет уже с учётом освещения, компоненты в диапазоне 0..1
+    pub color: Vec3,
+}
+
+impl ShadedVertex {
+    pub fn new(clip_position: Vec4, color: Vec3) -> Self {
+        Self {
+            clip_position,
+            color,
+        }
+    }
+}
+
 pub struct DrawContext<'frame> {
     pub frame: &'frame mut [u8],
     pub depth: &'frame mut [f32],
     pub width: u32,
     pub height: u32,
+    /// Цвет проволочных линий: у них атрибутов нет, цвет задаётся снаружи
     pub color: [u8; 4],
 }
 
@@ -43,8 +67,11 @@ impl<'frame> DrawContext<'frame> {
 
     /// Запись с тестом глубины. `inv_w` — величина 1/w: чем больше, тем ближе.
     /// Координаты уже проверены растеризатором, границы не трогаем.
+    ///
+    /// Цвет приходит параметром, а не из `self`: у залитого треугольника он
+    /// свой в каждом пикселе — это и есть результат интерполяции.
     #[inline]
-    pub fn set_pixel_depth(&mut self, x: usize, y: usize, inv_w: f32) {
+    pub fn set_pixel_depth(&mut self, x: usize, y: usize, inv_w: f32, color: Vec3) {
         let i = y * self.width as usize + x;
 
         if inv_w <= self.depth[i] {
@@ -52,9 +79,24 @@ impl<'frame> DrawContext<'frame> {
         }
 
         self.depth[i] = inv_w;
+
         let p = i * 4;
-        self.frame[p..p + 4].copy_from_slice(&self.color);
+        // Смешивания нет, пиксель всегда непрозрачный. Когда появится
+        // прозрачность, альфа станет таким же интерполируемым атрибутом
+        self.frame[p..p + 4].copy_from_slice(&[
+            channel_to_u8(color.x),
+            channel_to_u8(color.y),
+            channel_to_u8(color.z),
+            255,
+        ]);
     }
+}
+
+/// Канал 0..1 -> байт. Интерполяция может слегка вылезти за диапазон
+/// из-за ошибок f32, поэтому зажимаем
+#[inline]
+fn channel_to_u8(value: f32) -> u8 {
+    (value * 255.0).clamp(0.0, 255.0) as u8
 }
 
 // Perspective Divide
@@ -95,15 +137,35 @@ pub fn draw_triangle_wireframe(v0: Vec4, v1: Vec4, v2: Vec4, ctx: &mut DrawConte
     draw_clipped_edge(v2, v0, ctx);
 }
 
-pub fn draw_triangle_filled(v0: Vec4, v1: Vec4, v2: Vec4, ctx: &mut DrawContext) {
-    // Клиппинг гарантировал w > 0
-    let iw0 = 1.0 / v0.w;
-    let iw1 = 1.0 / v1.w;
-    let iw2 = 1.0 / v2.w;
+pub fn draw_triangle_filled(
+    v0: ShadedVertex,
+    v1: ShadedVertex,
+    v2: ShadedVertex,
+    ctx: &mut DrawContext,
+) {
+    let (p0, p1, p2) = (v0.clip_position, v1.clip_position, v2.clip_position);
 
-    let (x0, y0) = ndc_to_screen_f(v0.x * iw0, v0.y * iw0, ctx.width, ctx.height);
-    let (x1, y1) = ndc_to_screen_f(v1.x * iw1, v1.y * iw1, ctx.width, ctx.height);
-    let (x2, y2) = ndc_to_screen_f(v2.x * iw2, v2.y * iw2, ctx.width, ctx.height);
+    // Клиппинг гарантировал w > 0
+    let iw0 = 1.0 / p0.w;
+    let iw1 = 1.0 / p1.w;
+    let iw2 = 1.0 / p2.w;
+
+    // Атрибуты заранее делим на w.
+    //
+    // Барицентрические координаты мы считаем на ЭКРАНЕ, уже после
+    // перспективного деления, а оно нелинейно: равные шаги по экрану
+    // соответствуют разным шагам по поверхности треугольника. Линейно по
+    // экрану меняется не сам атрибут, а его отношение к w — как и 1/w.
+    // Поэтому интерполируем attr/w и 1/w по отдельности, а в пикселе делим
+    // одно на другое и получаем attr. Без этого деления цвета и текстуры
+    // «плывут» на гранях, повёрнутых к камере под углом
+    let c0 = v0.color * iw0;
+    let c1 = v1.color * iw1;
+    let c2 = v2.color * iw2;
+
+    let (x0, y0) = ndc_to_screen_f(p0.x * iw0, p0.y * iw0, ctx.width, ctx.height);
+    let (x1, y1) = ndc_to_screen_f(p1.x * iw1, p1.y * iw1, ctx.width, ctx.height);
+    let (x2, y2) = ndc_to_screen_f(p2.x * iw2, p2.y * iw2, ctx.width, ctx.height);
 
     let area = edge(x0, y0, x1, y1, x2, y2);
 
@@ -152,7 +214,12 @@ pub fn draw_triangle_filled(v0: Vec4, v1: Vec4, v2: Vec4, ctx: &mut DrawContext)
             // в отличие от самого z, который так интерполировать нельзя
             let inv_w = b0 * iw0 + b1 * iw1 + b2 * iw2;
 
-            ctx.set_pixel_depth(x, y, inv_w);
+            // Тот же приём для цвета: интерполируем color/w, потом делим на
+            // интерполированное 1/w — деление возвращает нас к самому цвету
+            let color_over_w = c0 * b0 + c1 * b1 + c2 * b2;
+            let color = color_over_w * (1.0 / inv_w);
+
+            ctx.set_pixel_depth(x, y, inv_w, color);
         }
     }
 }
@@ -243,4 +310,113 @@ pub fn is_backface(v0: Vec4, v1: Vec4, v2: Vec4) -> bool {
     let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
 
     area <= 0.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WIDTH: u32 = 100;
+    const HEIGHT: u32 = 100;
+
+    /// Вершина по координатам NDC: в clip space они умножены на w,
+    /// поэтому экранное положение от выбора w не зависит — меняется
+    /// только «глубина», а с ней и поправка при интерполяции
+    fn vertex(ndc_x: f32, ndc_y: f32, w: f32, red: f32) -> ShadedVertex {
+        ShadedVertex::new(
+            Vec4 {
+                x: ndc_x * w,
+                y: ndc_y * w,
+                z: 0.0,
+                w,
+            },
+            Vec3::new(red, 0.0, 0.0),
+        )
+    }
+
+    /// Треугольник с красной ближней вершиной слева (экранный x = 10) и двумя
+    /// чёрными справа на одной вертикали (экранный x = 90).
+    ///
+    /// Две правые вершины стоят на общей вертикали не случайно: тогда вес
+    /// левой вершины зависит только от x пикселя, b0 = (90 - x) / 80, и
+    /// ожидаемый цвет можно посчитать на бумаге, не повторяя растеризатор
+    fn render_gradient(w_far: f32) -> Vec<u8> {
+        let mut frame = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+        let mut depth = vec![0.0f32; (WIDTH * HEIGHT) as usize];
+        let mut ctx = DrawContext::new(&mut frame, &mut depth, WIDTH, HEIGHT, [0, 0, 0, 255]);
+
+        draw_triangle_filled(
+            vertex(-0.8, 0.0, 1.0, 1.0),
+            vertex(0.8, 0.0, w_far, 0.0),
+            vertex(0.8, 0.8, w_far, 0.0),
+            &mut ctx,
+        );
+
+        frame
+    }
+
+    fn red_at(frame: &[u8], x: u32, y: u32) -> u8 {
+        frame[((y * WIDTH + x) * 4) as usize]
+    }
+
+    /// Вес левой вершины в пикселе с данным x
+    fn weight_of_near_vertex(x: u32) -> f32 {
+        (90.0 - (x as f32 + 0.5)) / 80.0
+    }
+
+    #[test]
+    fn equal_w_makes_interpolation_plain_linear() {
+        // Все вершины на одной глубине — делить на 1/w нечего, поправка
+        // обязана выродиться в обычное линейное смешивание
+        let frame = render_gradient(1.0);
+
+        for x in [50, 60, 70] {
+            let expected = (weight_of_near_vertex(x) * 255.0) as u8;
+
+            assert_eq!(red_at(&frame, x, 30), expected, "пиксель x={}", x);
+        }
+    }
+
+    #[test]
+    fn interpolation_is_perspective_correct() {
+        // Дальние вершины отодвинуты в девять раз. Ожидание считаем по формуле
+        // attr = sum(b*a/w) / sum(b/w) — независимо от кода растеризатора
+        let frame = render_gradient(9.0);
+
+        for x in [50, 60, 70] {
+            let b0 = weight_of_near_vertex(x);
+            let expected = (b0 / (b0 + (1.0 - b0) / 9.0) * 255.0) as u8;
+
+            assert_eq!(red_at(&frame, x, 30), expected, "пиксель x={}", x);
+        }
+    }
+
+    #[test]
+    fn perspective_correction_pulls_color_towards_the_near_vertex() {
+        // Смысл поправки: дальняя вершина занимает на экране меньше «своей»
+        // поверхности, поэтому её вклад должен быть слабее линейного
+        let linear = render_gradient(1.0);
+        let corrected = render_gradient(9.0);
+
+        for x in [50, 60, 70] {
+            assert!(
+                red_at(&corrected, x, 30) > red_at(&linear, x, 30) + 50,
+                "в пикселе x={} поправка почти ничего не изменила: {} против {}",
+                x,
+                red_at(&corrected, x, 30),
+                red_at(&linear, x, 30)
+            );
+        }
+    }
+
+    #[test]
+    fn interpolated_color_never_overshoots_vertex_values() {
+        // Деление на интерполированное 1/w не должно выбрасывать результат
+        // за пределы отрезка между значениями в вершинах
+        let frame = render_gradient(9.0);
+
+        for pixel in frame.chunks_exact(4).filter(|p| p[3] != 0) {
+            assert!(pixel[1] == 0 && pixel[2] == 0, "появился цвет из ниоткуда");
+        }
+    }
 }

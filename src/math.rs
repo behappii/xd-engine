@@ -7,7 +7,8 @@ pub struct Vec3 {
 
 impl Vec3 {
     // Создание нового вектора
-    pub fn new(x: f32, y: f32, z: f32) -> Self {
+    // const — чтобы вектор можно было записать в константу в config.rs
+    pub const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
 
@@ -69,12 +70,6 @@ pub struct Vec4 {
     pub y: f32,
     pub z: f32,
     pub w: f32,
-}
-
-impl Vec4 {
-    pub fn to_vec3_dir(self) -> Vec3 {
-        Vec3::new(self.x, self.y, self.z)
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -203,6 +198,26 @@ impl Mat4 {
             ],
         }
     }
+
+    /// Преобразование вектора-НАПРАВЛЕНИЯ (нормали, оси, скорости).
+    ///
+    /// Отличие от `&Mat4 * Vec3`: там подставляется `w = 1.0`, то есть вектор
+    /// считается точкой и к нему прибавляется столбец трансляции `cols[3]`.
+    /// Направление сдвигать нельзя — оно задаёт ориентацию, а не место,
+    /// поэтому здесь `w = 0.0` и трансляция просто не участвует.
+    ///
+    /// Верно для поворотов и равномерного масштаба (после `.normalize()`).
+    /// Для неравномерного масштаба нормали требуют обратно-транспонированной
+    /// матрицы — этого здесь пока нет.
+    pub fn transform_dir(&self, dir: Vec3) -> Vec3 {
+        let c = self.cols;
+
+        Vec3::new(
+            c[0][0] * dir.x + c[1][0] * dir.y + c[2][0] * dir.z,
+            c[0][1] * dir.x + c[1][1] * dir.y + c[2][1] * dir.z,
+            c[0][2] * dir.x + c[1][2] * dir.y + c[2][2] * dir.z,
+        )
+    }
 }
 
 impl std::ops::Mul<Vec3> for &Mat4 {
@@ -243,5 +258,134 @@ impl std::ops::Mul<&Mat4> for &Mat4 {
         }
 
         Mat4 { cols: result_cols }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Свой допуск, а не config::EPSILON: тот задаёт геометрический порог
+    /// в клиппинге, а здесь речь про накопленную ошибку f32
+    const EPS: f32 = 1e-5;
+
+    fn assert_vec3_eq(actual: Vec3, expected: Vec3) {
+        let d = actual - expected;
+
+        assert!(
+            d.length() < EPS,
+            "ожидали {:?}, получили {:?}",
+            expected,
+            actual
+        );
+    }
+
+    // --- transform_dir: направление против точки ---
+
+    #[test]
+    fn transform_dir_ignores_translation() {
+        let model = Mat4::translation(10.0, -5.0, 3.0);
+        let dir = Vec3::new(0.0, 0.0, 1.0);
+
+        assert_vec3_eq(model.transform_dir(dir), dir);
+    }
+
+    #[test]
+    fn mul_vec3_applies_translation() {
+        // Обратная сторона: точка трансляцию получить ОБЯЗАНА.
+        // Если этот тест сломается — сломан весь пайплайн, а не только свет
+        let model = Mat4::translation(10.0, -5.0, 3.0);
+        let point = &model * Vec3::new(0.0, 0.0, 1.0);
+
+        assert_vec3_eq(Vec3::new(point.x, point.y, point.z), Vec3::new(10.0, -5.0, 4.0));
+    }
+
+    #[test]
+    fn transform_dir_applies_rotation() {
+        // Поворот на 90° вокруг Y переводит +Z в +X
+        let model = Mat4::rotation_y(90.0);
+
+        assert_vec3_eq(
+            model.transform_dir(Vec3::new(0.0, 0.0, 1.0)),
+            Vec3::new(1.0, 0.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn normal_of_distant_instance_keeps_direction() {
+        // Регрессия: куб из кольца — далеко от начала координат и уменьшен.
+        // Пока нормаль умножалась как точка, к ней прибавлялась позиция (6, -2, 0)
+        // и «нормаль» превращалась в направление на объект — свет врал
+        let model = &Mat4::translation(6.0, -2.0, 0.0) * &Mat4::scaling(0.3, 0.3, 0.3);
+        let n_local = Vec3::new(0.0, 1.0, 0.0);
+
+        // Равномерный масштаб меняет длину, но не направление — normalize() его убирает
+        assert_vec3_eq(model.transform_dir(n_local).normalize(), n_local);
+    }
+
+    // --- матрицы камеры и проекции ---
+
+    #[test]
+    fn look_at_puts_eye_at_origin() {
+        let eye = Vec3::new(3.0, 4.0, 5.0);
+        let view = Mat4::look_at(eye, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+
+        // Смысл матрицы вида: перенести мир так, чтобы камера села в начало координат
+        let p = &view * eye;
+
+        assert_vec3_eq(Vec3::new(p.x, p.y, p.z), Vec3::new(0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn perspective_w_is_distance_in_front_of_camera() {
+        let proj = Mat4::perspective(75.0, 4.0 / 3.0, 0.1, 100.0);
+
+        // Камера смотрит вдоль -Z, значит точка в 5 единицах перед ней — это z = -5.
+        // Именно на этом держится depth-буфер: он хранит 1/w
+        let clip = &proj * Vec3::new(0.0, 0.0, -5.0);
+
+        assert!((clip.w - 5.0).abs() < EPS, "w = {}", clip.w);
+    }
+
+    #[test]
+    fn perspective_maps_near_and_far_to_ndc_range() {
+        let (near, far) = (0.1, 100.0);
+        let proj = Mat4::perspective(75.0, 4.0 / 3.0, near, far);
+
+        let at_near = &proj * Vec3::new(0.0, 0.0, -near);
+        let at_far = &proj * Vec3::new(0.0, 0.0, -far);
+
+        // После перспективного деления ближняя плоскость даёт -1, дальняя +1
+        assert!((at_near.z / at_near.w + 1.0).abs() < EPS);
+        assert!((at_far.z / at_far.w - 1.0).abs() < EPS);
+    }
+
+    // --- базовая алгебра ---
+
+    #[test]
+    fn cross_follows_right_hand_rule() {
+        let x = Vec3::new(1.0, 0.0, 0.0);
+        let y = Vec3::new(0.0, 1.0, 0.0);
+
+        assert_vec3_eq(x.cross(&y), Vec3::new(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn normalize_of_zero_vector_does_not_produce_nan() {
+        let zero = Vec3::new(0.0, 0.0, 0.0).normalize();
+
+        assert!(zero.x.is_finite() && zero.y.is_finite() && zero.z.is_finite());
+    }
+
+    #[test]
+    fn identity_is_neutral_for_multiplication() {
+        let m = &Mat4::translation(1.0, 2.0, 3.0) * &Mat4::rotation_z(30.0);
+        let same = &m * &Mat4::identity();
+
+        for col in 0..4 {
+            for row in 0..4 {
+                assert!((m.cols[col][row] - same.cols[col][row]).abs() < EPS);
+            }
+        }
     }
 }

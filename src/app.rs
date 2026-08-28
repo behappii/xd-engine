@@ -23,7 +23,7 @@ pub struct EngineApp {
     pressed_keys: HashSet<KeyCode>, // нажатые клавиши
 
     // функция для вызова обновлений
-    // Scene - для вызова инстансов или еще чего-то что ледит в сцене
+    // Scene - для вызова инстансов или еще чего-то что лежит в сцене
     // HashSet<KeyCode> - для обработки нажатия клавиш (press)
     // f32 - взять dt для независимости обработки кадров от FPS
     update_callback: Option<Box<dyn FnMut(&mut Scene, &HashSet<KeyCode>, f32)>>,

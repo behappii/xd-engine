@@ -2,20 +2,14 @@ use std::rc::Rc;
 
 use winit::{event_loop::EventLoop, keyboard::KeyCode};
 
-use crate::{
+// Движок живёт в библиотечном крейте (src/lib.rs), а этот файл — обычный
+// внешний пользователь: он собирает сцену и запускает цикл.
+use xd_engine::{
     app::EngineApp,
     config::{CAMERA_MOVEMENT_SPEED, CAMERA_ROTATION_SPEED},
     math::Vec3,
     scene::{Instance, Mesh},
 };
-
-mod app;
-mod clipping;
-mod config;
-mod fps_counter;
-mod math;
-mod renderer;
-mod scene;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Создание цикла обработки обновлений winit
@@ -74,15 +68,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Закидываем инстансы в сцену движка
+    // Сфера — единственный здесь меш с гладким затенением. На кубе и пирамиде
+    // разницы не увидеть: у них нормали всех трёх вершин грани совпадают, и
+    // интерполировать между ними нечего. Здесь же нормаль непрерывна, и
+    // затенение по Гуро размазывает свет по поверхности, скрывая грани
+    let mut obj5 = Instance::new(Mesh::create_sphere(16, 24), Vec3::new(1.8, 0.7, 0.0))
+        .with_color([120, 190, 255, 255])
+        .as_wireframe();
+    obj5.scale = Vec3::new(0.7, 0.7, 0.7);
+
     app.scene.add_instance(obj1);
     app.scene.add_instance(obj2);
     app.scene.add_instance(obj3);
     app.scene.add_instance(obj4);
+    app.scene.add_instance(obj5);
 
+    // Ручная деформация одного экземпляра меша.
+    // Rc::make_mut видит, что куб разделяют несколько инстансов, и молча
+    // клонирует его — правки достанутся только instances[0]
     let mesh = Rc::make_mut(&mut app.scene.instances[0].mesh);
-    mesh.vertices[0].y -= 1.0;
-    mesh.vertices[1].x += 2.0;
-    mesh.vertices[5].z += 4.0;
+    mesh.vertices[0].position.y -= 1.0;
+    mesh.vertices[1].position.x += 2.0;
+    mesh.vertices[5].position.z += 4.0;
+    // Позиции сдвинулись — предвычисленные нормали устарели и свет на этих
+    // гранях врал бы. Пересчитываем.
+    // Учти: у меша с плоским затенением вершины расщеплены, поэтому соседние
+    // грани больше не делят вершину и деформация рвёт куб по рёбрам
+    mesh.recalculate_flat_normals();
 
     // создаем переменную, которую будем изменять в цикле обновления
     let mut angle: f32 = 0.0;
@@ -93,10 +105,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         angle += 45.0 * dt;
 
-        for i in 0..23 {
-            scene.instances[i].rotation.y = angle + (i as f32);
-            scene.instances[i].position.y =
-                (angle * std::f32::consts::PI / 180.0).sin() * ((i + 2) as f32);
+        // Итерируемся по всем инстансам, а не по жёстко зашитому числу:
+        // теперь добавление объекта в сцену не ломает анимацию
+        for (i, instance) in scene.instances.iter_mut().enumerate() {
+            instance.rotation.y = angle + (i as f32);
+            // instance.position.y = (angle * std::f32::consts::PI / 180.0).sin() * ((i + 2) as f32);
         }
 
         // КАМЕРА

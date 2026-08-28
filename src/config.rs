@@ -1,9 +1,11 @@
+use crate::math::Vec3;
+
 //Настройки окна
 
 /// Ширина окна (пикс)
-pub const WIDTH: u32 = 400;
+pub const WIDTH: u32 = 800;
 /// Высота окна (пикс)
-pub const HEIGHT: u32 = 300;
+pub const HEIGHT: u32 = 600;
 /// Заголовок окна
 pub const WINDOW_TITLE: &str = "Rust 3D Engine";
 
@@ -13,6 +15,13 @@ pub const WINDOW_TITLE: &str = "Rust 3D Engine";
 pub const CLEAR_COLOR: [u8; 4] = [20, 20, 20, 255];
 /// Цвет ребра (4 байт)
 pub const LINE_COLOR: [u8; 4] = [0, 255, 0, 255];
+
+// Освещение
+
+/// Направление НА источник света (солнце: лучи параллельны, позиции нет)
+pub const LIGHT_DIRECTION: Vec3 = Vec3::new(0.5, 1.0, 0.8);
+/// Фоновая подсветка, чтобы неосвещённая сторона не была чёрной
+pub const AMBIENT_LIGHT: f32 = 0.25;
 
 // Настройки камеры
 
