@@ -12,13 +12,17 @@ use xd_engine::{
 const WIDTH: u32 = 200;
 const HEIGHT: u32 = 150;
 
-fn render(scene: &Scene) -> Vec<u8> {
-    let mut frame = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
-    let mut depth = vec![0.0f32; (WIDTH * HEIGHT) as usize];
+fn render_at(scene: &Scene, width: u32, height: u32) -> Vec<u8> {
+    let mut frame = vec![0u8; (width * height * 4) as usize];
+    let mut depth = vec![0.0f32; (width * height) as usize];
 
-    scene.draw(&mut frame, &mut depth, WIDTH, HEIGHT);
+    scene.draw(&mut frame, &mut depth, width, height);
 
     frame
+}
+
+fn render(scene: &Scene) -> Vec<u8> {
+    render_at(scene, WIDTH, HEIGHT)
 }
 
 /// Цвета всех закрашенных пикселей. Фон — нули, его отбрасываем.
@@ -180,6 +184,97 @@ fn smooth_normals_stay_unit_length() {
             vertex.normal.length()
         );
     }
+}
+
+/// Размер закрашенной области в пикселях: (ширина, высота) габаритного
+/// прямоугольника. Ноль на ноль, если не закрашено ничего
+fn painted_size(frame: &[u8], width: u32) -> (u32, u32) {
+    let painted: Vec<(u32, u32)> = frame
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(_, p)| p[3] != 0)
+        .map(|(i, _)| (i as u32 % width, i as u32 / width))
+        .collect();
+
+    if painted.is_empty() {
+        return (0, 0);
+    }
+
+    let xs = painted.iter().map(|(x, _)| *x);
+    let ys = painted.iter().map(|(_, y)| *y);
+
+    // +1, потому что габарит из одного пикселя — это ширина 1, а не 0
+    (
+        xs.clone().max().unwrap() - xs.min().unwrap() + 1,
+        ys.clone().max().unwrap() - ys.min().unwrap() + 1,
+    )
+}
+
+#[test]
+fn widening_the_viewport_adds_margins_instead_of_stretching() {
+    // Регрессия на ресайз, но проверяемая без окна: до этого размер кадра
+    // приходил из констант, и растягивание окна плющило картинку.
+    //
+    // Почему ожидание именно такое. В `perspective` горизонтальный масштаб
+    // равен вертикальному, делённому на aspect = width / height. Дальше NDC
+    // умножается обратно на width при переводе в пиксели — и width
+    // сокращается начисто:
+    //
+    //     x_экр = X * scale_y * height / (2w) + width / 2
+    //
+    // Ширины в формуле не осталось, есть только высота. Значит вдвое более
+    // широкий кадр обязан дать фигуру ТОГО ЖЕ размера в пикселях, просто
+    // с большими полями по бокам. Если бы aspect брался из константы,
+    // а не из настоящего размера кадра, фигура растянулась бы вдвое
+    let mut scene = Scene::new();
+    scene.add_instance(tilted_cube(Vec3::new(0.0, 0.0, 0.0)));
+
+    let narrow = painted_size(&render_at(&scene, 200, 150), 200);
+    let wide = painted_size(&render_at(&scene, 400, 150), 400);
+
+    assert!(narrow.0 > 0, "куб не попал в кадр, проверять нечего");
+
+    // Допуск в пиксель — на округление при попадании краёв фигуры в сетку
+    assert!(
+        narrow.0.abs_diff(wide.0) <= 1,
+        "куб растянуло по горизонтали: {} пикс. против {}",
+        narrow.0,
+        wide.0
+    );
+    assert!(
+        narrow.1.abs_diff(wide.1) <= 1,
+        "высота не должна была измениться вовсе: {} пикс. против {}",
+        narrow.1,
+        wide.1
+    );
+}
+
+#[test]
+fn taller_viewport_scales_the_picture_with_it() {
+    // Обратная половина того же правила: высота кадра в формуле осталась,
+    // причём линейно. Удвоив высоту при том же угле обзора, мы обязаны
+    // получить вдвое более крупный объект.
+    //
+    // Тест не дублирует предыдущий, а закрывает вертикаль, которую тот
+    // структурно не видит: там оба кадра одной высоты. Проверено поломкой —
+    // если зашить высоту в перевод NDC в пиксели константой, соседний тест
+    // остаётся зелёным, а этот краснеет. Aspect же на вертикаль не влияет
+    // вовсе, так что его поломки ловит именно соседний тест
+    let mut scene = Scene::new();
+    scene.add_instance(tilted_cube(Vec3::new(0.0, 0.0, 0.0)));
+
+    let small = painted_size(&render_at(&scene, 200, 150), 200);
+    let tall = painted_size(&render_at(&scene, 200, 300), 200);
+
+    let ratio = tall.1 as f32 / small.1 as f32;
+
+    assert!(
+        (ratio - 2.0).abs() < 0.05,
+        "высота фигуры выросла в {:.3} раза вместо 2 ({} пикс. против {})",
+        ratio,
+        tall.1,
+        small.1
+    );
 }
 
 #[test]
