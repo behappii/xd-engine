@@ -11,3 +11,4 @@ pub mod fps_counter;
 pub mod math;
 pub mod renderer;
 pub mod scene;
+pub mod texture;

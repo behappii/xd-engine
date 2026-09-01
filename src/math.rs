@@ -1,3 +1,43 @@
+/// Двумерный вектор. Заведён ради UV-координат: текстурная координата — такой
+/// же интерполируемый атрибут вершины, как цвет, и ей нужны те же операции
+/// (сложение, вычитание, умножение на число), чтобы ездить через `lerp` и
+/// барицентрики
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vec2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Vec2 {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+
+    /// Начало координат — «текстуры нет». Меши без развёртки заполняются им
+    pub const ZERO: Self = Self::new(0.0, 0.0);
+}
+
+impl std::ops::Add for Vec2 {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Vec2::new(self.x + other.x, self.y + other.y)
+    }
+}
+
+impl std::ops::Sub for Vec2 {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
+        Vec2::new(self.x - other.x, self.y - other.y)
+    }
+}
+
+impl std::ops::Mul<f32> for Vec2 {
+    type Output = Self;
+    fn mul(self, num: f32) -> Self {
+        Vec2::new(self.x * num, self.y * num)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Vec3 {
     pub x: f32,
@@ -61,6 +101,19 @@ impl std::ops::Sub for Vec3 {
     type Output = Self;
     fn sub(self, other: Self) -> Self {
         Vec3::new(self.x - other.x, self.y - other.y, self.z - other.z)
+    }
+}
+
+/// Покомпонентное произведение (произведение Адамара).
+///
+/// В линейной алгебре у двух векторов «умножения» в таком смысле нет — там
+/// dot и cross. Но у нас Vec3 подрабатывает ещё и цветом, а модуляция цвета
+/// цветом — это ровно покомпонентное умножение: белый свет × красная текстура
+/// = красный. Именно так свет умножается на текселя в `draw_triangle_filled`
+impl std::ops::Mul<Vec3> for Vec3 {
+    type Output = Self;
+    fn mul(self, other: Self) -> Self {
+        Vec3::new(self.x * other.x, self.y * other.y, self.z * other.z)
     }
 }
 
@@ -297,7 +350,10 @@ mod tests {
         let model = Mat4::translation(10.0, -5.0, 3.0);
         let point = &model * Vec3::new(0.0, 0.0, 1.0);
 
-        assert_vec3_eq(Vec3::new(point.x, point.y, point.z), Vec3::new(10.0, -5.0, 4.0));
+        assert_vec3_eq(
+            Vec3::new(point.x, point.y, point.z),
+            Vec3::new(10.0, -5.0, 4.0),
+        );
     }
 
     #[test]

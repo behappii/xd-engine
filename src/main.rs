@@ -9,6 +9,7 @@ use xd_engine::{
     config::{CAMERA_MOVEMENT_SPEED, CAMERA_ROTATION_SPEED},
     math::Vec3,
     scene::{Instance, Mesh},
+    texture::Texture,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,11 +78,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_wireframe();
     obj5.scale = Vec3::new(0.7, 0.7, 0.7);
 
+    // Процедурная шахматка — не нужен ни файл, ни художник
+    let checker = Texture::checker(4, 2, [230, 230, 230, 255], [40, 40, 60, 255]);
+
+    // Картинка из файла. Путь относительный — `cargo run` запускается из
+    // корня проекта. `?` уводит ошибку наверх: движок не должен молча
+    // подставлять заглушку, если текстуру не нашли
+    let photo = Rc::new(Texture::load("textures/noname.png").unwrap_or_else(|err| {
+        eprintln!("текстура не загрузилась ({err}), берём шахматку");
+        Texture::checker(4, 2, [230, 230, 230, 255], [40, 40, 60, 255])
+    }));
+
+    // Куб с текстурой. Развёртка `create_cube` отдаёт каждой грани весь
+    // квадрат картинки, так что она ложится на грань целиком.
+    // Цвет белый не случайно: тексель на него умножается, и любой другой
+    // цвет подкрасил бы фотографию
+    let mut obj6 = Instance::new(Rc::clone(&cube), Vec3::new(3.6, 0.7, 0.0))
+        .with_color([255, 255, 255, 255])
+        .with_texture(photo);
+    obj6.scale = Vec3::new(0.6, 0.6, 0.6);
+
+    // Пол — тот же куб, расплющенный по Y. Он здесь ради перспективной
+    // коррекции: клетки уходят к горизонту, и любая ошибка в интерполяции
+    // UV сразу выгнет их дугой. UV умножается на 12, чтобы одна картинка
+    // разложилась плиткой — за это отвечает режим repeat в Texture::sample
+    let mut floor_mesh = Mesh::create_cube();
+    for vertex in &mut floor_mesh.vertices {
+        vertex.uv = vertex.uv * 12.0;
+    }
+
+    let mut floor = Instance::new(floor_mesh, Vec3::new(0.0, -3.0, 0.0))
+        .with_color([255, 255, 255, 255])
+        .with_texture(checker);
+    floor.scale = Vec3::new(20.0, 0.2, 20.0);
+
     app.scene.add_instance(obj1);
     app.scene.add_instance(obj2);
     app.scene.add_instance(obj3);
     app.scene.add_instance(obj4);
     app.scene.add_instance(obj5);
+    app.scene.add_instance(obj6);
+    app.scene.add_instance(floor);
+
+    // Пол крутиться не должен: анимация ниже вращает всё подряд
+    let floor_index = app.scene.instances.len() - 1;
 
     // Ручная деформация одного экземпляра меша.
     // Rc::make_mut видит, что куб разделяют несколько инстансов, и молча
@@ -108,6 +148,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Итерируемся по всем инстансам, а не по жёстко зашитому числу:
         // теперь добавление объекта в сцену не ломает анимацию
         for (i, instance) in scene.instances.iter_mut().enumerate() {
+            if i == floor_index {
+                continue;
+            }
+
             instance.rotation.y = angle + (i as f32);
             // instance.position.y = (angle * std::f32::consts::PI / 180.0).sin() * ((i + 2) as f32);
         }

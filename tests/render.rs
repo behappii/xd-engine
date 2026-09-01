@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use xd_engine::{
     math::Vec3,
     scene::{Instance, Mesh, Scene},
+    texture::Texture,
 };
 
 const WIDTH: u32 = 200;
@@ -90,7 +91,10 @@ fn shading_does_not_depend_on_world_position() {
     far_away.add_instance(tilted_cube(offset));
     far_away.camera_position = at_origin.camera_position + offset;
 
-    assert_eq!(face_colors(&render(&at_origin)), face_colors(&render(&far_away)));
+    assert_eq!(
+        face_colors(&render(&at_origin)),
+        face_colors(&render(&far_away))
+    );
 }
 
 #[test]
@@ -186,9 +190,9 @@ fn smooth_normals_stay_unit_length() {
     }
 }
 
-/// Размер закрашенной области в пикселях: (ширина, высота) габаритного
-/// прямоугольника. Ноль на ноль, если не закрашено ничего
-fn painted_size(frame: &[u8], width: u32) -> (u32, u32) {
+/// Габаритный прямоугольник закрашенной области: (min_x, min_y, max_x, max_y),
+/// границы включительно. `None`, если не закрашено ничего
+fn painted_bounds(frame: &[u8], width: u32) -> Option<(u32, u32, u32, u32)> {
     let painted: Vec<(u32, u32)> = frame
         .chunks_exact(4)
         .enumerate()
@@ -197,17 +201,28 @@ fn painted_size(frame: &[u8], width: u32) -> (u32, u32) {
         .collect();
 
     if painted.is_empty() {
-        return (0, 0);
+        return None;
     }
 
     let xs = painted.iter().map(|(x, _)| *x);
     let ys = painted.iter().map(|(_, y)| *y);
 
-    // +1, потому что габарит из одного пикселя — это ширина 1, а не 0
-    (
-        xs.clone().max().unwrap() - xs.min().unwrap() + 1,
-        ys.clone().max().unwrap() - ys.min().unwrap() + 1,
-    )
+    Some((
+        xs.clone().min().unwrap(),
+        ys.clone().min().unwrap(),
+        xs.max().unwrap(),
+        ys.max().unwrap(),
+    ))
+}
+
+/// Размер закрашенной области в пикселях: (ширина, высота) габаритного
+/// прямоугольника. Ноль на ноль, если не закрашено ничего
+fn painted_size(frame: &[u8], width: u32) -> (u32, u32) {
+    match painted_bounds(frame, width) {
+        // +1, потому что габарит из одного пикселя — это ширина 1, а не 0
+        Some((min_x, min_y, max_x, max_y)) => (max_x - min_x + 1, max_y - min_y + 1),
+        None => (0, 0),
+    }
 }
 
 #[test]
@@ -275,6 +290,196 @@ fn taller_viewport_scales_the_picture_with_it() {
         tall.1,
         small.1
     );
+}
+
+/// Шахматка 2×2 клетки: белая и красная.
+///
+/// Клетки различаются оттенком, а не яркостью, и это принципиально для
+/// точного счёта цветов. Умножение на белый тексель — это ×1, оно возвращает
+/// ровно тот байт, что и без текстуры; умножение на чистый красный обнуляет
+/// два канала и оставляет тот же байт в третьем. Никаких новых округлений
+/// не появляется, поэтому набор цветов предсказуем побайтово.
+///
+/// Первая версия теста брала тёмно-серую клетку и ломалась: неосвещённая
+/// грань светится ровно фоновой подсветкой AMBIENT_LIGHT = 0.25, а 0.25 от
+/// 60/255 — это точно 15/255, то есть граница между двумя байтами. Половина
+/// пикселей грани падала по одну сторону, половина по другую, и «6 оттенков»
+/// превращались в 7
+fn checker() -> Texture {
+    Texture::checker(8, 2, [255, 255, 255, 255], [255, 0, 0, 255])
+}
+
+#[test]
+fn texture_multiplies_the_number_of_shades_by_the_number_of_texels() {
+    // Развёртка куба отдаёт каждой грани весь квадрат текстуры, поэтому на
+    // каждой из трёх видимых граней встречаются обе клетки шахматки. Свет
+    // текстуру не заменяет, а модулирует — значит оттенков должно стать
+    // ровно вдвое больше: 3 грани × 2 клетки.
+    //
+    // Тест ловит сразу две ошибки. Если UV не доехало до растеризатора, вся
+    // грань прочитает один тексель и оттенков останется 3 (столько же, сколько
+    // насчитал flat_shading_gives_one_color_per_visible_face). Если текстура
+    // затирает свет вместо умножения, оттенков станет 2 — по числу клеток
+    let mut scene = Scene::new();
+    scene.add_instance(tilted_cube(Vec3::new(0.0, 0.0, 0.0)).with_texture(checker()));
+
+    assert_eq!(face_colors(&render(&scene)).len(), 6);
+}
+
+#[test]
+fn the_cube_unwrap_puts_the_texture_upright_on_the_face() {
+    // Четвёрки углов в `create_cube` выведены руками: обход против часовой
+    // стрелки снаружи — чтобы нормаль смотрела наружу, начало с левого нижнего
+    // угла — чтобы картинка стояла ровно. Первое условие ловят тесты нормалей,
+    // а второе не поймает ничего: перепутанный стартовый угол просто повернёт
+    // текстуру, и на шахматке это вообще не видно.
+    //
+    // Поэтому текстура здесь несимметричная: четыре разных цвета по четвертям.
+    // Камера смотрит на грань +Z в упор, и каждая четверть картинки обязана
+    // оказаться в своей четверти экрана
+    let texture = Texture::from_rgba8(
+        2,
+        2,
+        &[
+            255, 0, 0, 255, // верх-лево  — красный
+            0, 255, 0, 255, // верх-право — зелёный
+            0, 0, 255, 255, // низ-лево   — синий
+            255, 255, 255, 255, // низ-право  — белый
+        ],
+    );
+
+    let mut scene = Scene::new();
+    scene.add_instance(
+        Instance::new(Mesh::create_cube(), Vec3::new(0.0, 0.0, 0.0))
+            .with_color([255, 255, 255, 255])
+            .with_texture(texture),
+    );
+
+    let frame = render(&scene);
+
+    // Грань занимает середину кадра; отступаем от центра на четверть,
+    // чтобы гарантированно попасть внутрь нужной четверти
+    let pixel = |x: u32, y: u32| {
+        let i = ((y * WIDTH + x) * 4) as usize;
+        [frame[i], frame[i + 1], frame[i + 2]]
+    };
+
+    // Какой канал ярче — тот цвет и лежит в этом пикселе
+    let dominant = |p: [u8; 3]| {
+        if p[0] > 0 && p[1] == 0 && p[2] == 0 {
+            "красный"
+        } else if p[1] > 0 && p[0] == 0 && p[2] == 0 {
+            "зелёный"
+        } else if p[2] > 0 && p[0] == 0 && p[1] == 0 {
+            "синий"
+        } else if p[0] > 0 && p[1] > 0 && p[2] > 0 {
+            "белый"
+        } else {
+            "пусто"
+        }
+    };
+
+    // Точки берём по четвертям РЕАЛЬНОГО габарита грани, а не по четвертям
+    // кадра: куб занимает лишь его середину, и фиксированный отступ от центра
+    // легко промахнулся бы мимо фигуры в фон
+    let (min_x, min_y, max_x, max_y) =
+        painted_bounds(&frame, WIDTH).expect("куб не попал в кадр, проверять нечего");
+
+    let left = min_x + (max_x - min_x) / 4;
+    let right = max_x - (max_x - min_x) / 4;
+    let top = min_y + (max_y - min_y) / 4;
+    let bottom = max_y - (max_y - min_y) / 4;
+
+    assert_eq!(dominant(pixel(left, top)), "красный", "верх-лево");
+    assert_eq!(dominant(pixel(right, top)), "зелёный", "верх-право");
+    assert_eq!(dominant(pixel(left, bottom)), "синий", "низ-лево");
+    assert_eq!(dominant(pixel(right, bottom)), "белый", "низ-право");
+}
+
+#[test]
+fn a_white_texture_changes_nothing() {
+    // Умножение на единицу обязано быть тождественным. Тест сторожит именно
+    // то, что текстурная ветка не делает с цветом ничего лишнего — например,
+    // не теряет перспективную коррекцию и не подмешивает собственную яркость
+    let mut plain = Scene::new();
+    plain.add_instance(tilted_cube(Vec3::new(0.0, 0.0, 0.0)));
+
+    let mut textured = Scene::new();
+    textured.add_instance(
+        tilted_cube(Vec3::new(0.0, 0.0, 0.0)).with_texture(Texture::checker(
+            4,
+            1,
+            [255, 255, 255, 255],
+            [255, 255, 255, 255],
+        )),
+    );
+
+    // Побайтовое совпадение всего кадра, а не только набора цветов
+    assert_eq!(render(&plain), render(&textured));
+}
+
+#[test]
+fn an_instance_without_a_texture_is_unaffected_by_its_neighbour() {
+    // Текстура — состояние, которое сцена переключает между инстансами.
+    // Забыть сбросить его — классическая ошибка «протёкшего» стейта:
+    // следующий объект отрисовался бы чужой картинкой
+    let mut alone = Scene::new();
+    alone.add_instance(tilted_cube(Vec3::new(0.0, 0.0, 0.0)));
+
+    let mut after_textured = Scene::new();
+    // Текстурированный куб стоит далеко в стороне и в кадр не попадает —
+    // важно только то, что он обрабатывается раньше
+    after_textured.add_instance(tilted_cube(Vec3::new(-40.0, 0.0, 0.0)).with_texture(checker()));
+    after_textured.add_instance(tilted_cube(Vec3::new(0.0, 0.0, 0.0)));
+
+    assert_eq!(
+        face_colors(&render(&alone)),
+        face_colors(&render(&after_textured))
+    );
+}
+
+#[test]
+fn uv_beyond_one_tiles_the_texture() {
+    // Развёртка куба лежит в 0..1, но UV можно масштабировать — тогда режим
+    // repeat раскладывает картинку плиткой. Проверяем, что координаты за
+    // пределами квадрата не обрезаются в край и не паникуют: у растянутой
+    // вчетверо шахматки клеток на грани должно стать заметно больше,
+    // а набор цветов — остаться прежним
+    let mut mesh = Mesh::create_cube();
+
+    for vertex in &mut mesh.vertices {
+        vertex.uv = vertex.uv * 4.0;
+    }
+
+    let mut tiled = Scene::new();
+    let mut instance = Instance::new(mesh, Vec3::new(0.0, 0.0, 0.0))
+        .with_color([255, 255, 255, 255])
+        .with_texture(checker());
+    instance.rotation = Vec3::new(20.0, 35.0, 0.0);
+    tiled.add_instance(instance);
+
+    let mut plain = Scene::new();
+    plain.add_instance(tilted_cube(Vec3::new(0.0, 0.0, 0.0)).with_texture(checker()));
+
+    // Цвета те же самые — меняется только их раскладка по поверхности
+    assert_eq!(face_colors(&render(&tiled)), face_colors(&render(&plain)));
+
+    // А вот переходов между клетками вдоль строки стало больше
+    assert!(
+        colour_switches_in_row(&render(&tiled), 75) > colour_switches_in_row(&render(&plain), 75)
+    );
+}
+
+/// Сколько раз цвет меняется вдоль строки кадра. Грубая мера «дробности»
+/// узора: чем мельче клетки, тем больше переходов
+fn colour_switches_in_row(frame: &[u8], y: u32) -> usize {
+    let row_start = (y * WIDTH * 4) as usize;
+    let row = &frame[row_start..row_start + (WIDTH * 4) as usize];
+
+    row.chunks_exact(4)
+        .zip(row.chunks_exact(4).skip(1))
+        .filter(|(a, b)| a != b)
+        .count()
 }
 
 #[test]

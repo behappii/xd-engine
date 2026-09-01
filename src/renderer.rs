@@ -1,7 +1,8 @@
 use crate::{
     clipping::clip_line_4d,
     config::EPSILON,
-    math::{Vec3, Vec4},
+    math::{Vec2, Vec3, Vec4},
+    texture::Texture,
 };
 
 /// Вершина на входе растеризатора: позиция в clip space плюс всё, что нужно
@@ -10,12 +11,16 @@ use crate::{
 /// Отдельный тип от `scene::Vertex`: там сырые атрибуты меша в локальных
 /// координатах, здесь — уже обработанные, готовые к растеризации. Пара
 /// «вершинный этап -> фрагментный этап» ровно та же, что в шейдерном
-/// пайплайне на GPU, а `color` здесь — это varying.
+/// пайплайне на GPU, а `color` и `uv` здесь — это varying.
 #[derive(Debug, Clone, Copy)]
 pub struct ShadedVertex {
     pub clip_position: Vec4,
     /// Цвет уже с учётом освещения, компоненты в диапазоне 0..1
     pub color: Vec3,
+    /// Текстурная координата. У меша без развёртки — нули: тогда вся грань
+    /// читает один и тот же тексель, что безобидно, потому что текстуры
+    /// у такого инстанса всё равно нет
+    pub uv: Vec2,
 }
 
 impl ShadedVertex {
@@ -23,20 +28,37 @@ impl ShadedVertex {
         Self {
             clip_position,
             color,
+            uv: Vec2::ZERO,
         }
+    }
+
+    pub fn with_uv(mut self, uv: Vec2) -> Self {
+        self.uv = uv;
+        self
     }
 }
 
-pub struct DrawContext<'frame> {
+/// Состояние отрисовки: куда пишем и чем.
+///
+/// Два времени жизни, а не одно, и это не придирка компилятора. `frame` —
+/// изменяемая ссылка, а `&mut` инвариантен: его время жизни нельзя молча
+/// укоротить до более короткого. Текстура же приезжает из инстанса, то есть
+/// живёт ровно столько, сколько одолжена сцена, — а это заведомо меньше, чем
+/// живёт буфер кадра, пришедший снаружи. Слепив оба в одно время жизни, мы бы
+/// потребовали от текстуры невозможного
+pub struct DrawContext<'frame, 'tex> {
     pub frame: &'frame mut [u8],
     pub depth: &'frame mut [f32],
     pub width: u32,
     pub height: u32,
     /// Цвет проволочных линий: у них атрибутов нет, цвет задаётся снаружи
     pub color: [u8; 4],
+    /// Текстура текущего инстанса. Как и `color` — состояние, которое сцена
+    /// переключает между объектами, а не свойство кадра
+    pub texture: Option<&'tex Texture>,
 }
 
-impl<'frame> DrawContext<'frame> {
+impl<'frame, 'tex> DrawContext<'frame, 'tex> {
     pub fn new(
         frame: &'frame mut [u8],
         depth: &'frame mut [f32],
@@ -50,6 +72,7 @@ impl<'frame> DrawContext<'frame> {
             width,
             height,
             color,
+            texture: None,
         }
     }
 
@@ -163,6 +186,17 @@ pub fn draw_triangle_filled(
     let c1 = v1.color * iw1;
     let c2 = v2.color * iw2;
 
+    // UV — обычный интерполируемый атрибут и проходит ровно ту же схему.
+    // Именно на текстуре пропущенная поправка видна лучше всего: цвет «плывёт»
+    // незаметно, а прямые линии шахматки на наклонной грани выгибаются дугой
+    let uv0 = v0.uv * iw0;
+    let uv1 = v1.uv * iw1;
+    let uv2 = v2.uv * iw2;
+
+    // Копия, а не обращение к ctx внутри цикла: ниже ctx одалживается
+    // изменяемо ради записи пикселя, а Option<&Texture> — Copy
+    let texture = ctx.texture;
+
     let (x0, y0) = ndc_to_screen_f(p0.x * iw0, p0.y * iw0, ctx.width, ctx.height);
     let (x1, y1) = ndc_to_screen_f(p1.x * iw1, p1.y * iw1, ctx.width, ctx.height);
     let (x2, y2) = ndc_to_screen_f(p2.x * iw2, p2.y * iw2, ctx.width, ctx.height);
@@ -214,10 +248,26 @@ pub fn draw_triangle_filled(
             // в отличие от самого z, который так интерполировать нельзя
             let inv_w = b0 * iw0 + b1 * iw1 + b2 * iw2;
 
+            // Одно деление на всю пару атрибутов: возвращаемся от attr/w к attr
+            let w = 1.0 / inv_w;
+
             // Тот же приём для цвета: интерполируем color/w, потом делим на
             // интерполированное 1/w — деление возвращает нас к самому цвету
             let color_over_w = c0 * b0 + c1 * b1 + c2 * b2;
-            let color = color_over_w * (1.0 / inv_w);
+            let color = color_over_w * w;
+
+            // Свет модулирует текстуру, а не заменяет её: тексель умножается
+            // на посчитанную в вершинах яркость покомпонентно. Поэтому
+            // затенение по Гуро никуда не девается — оно просто ложится
+            // поверх картинки, и грани по-прежнему темнеют с наклоном
+            let color = match texture {
+                Some(texture) => {
+                    let uv = (uv0 * b0 + uv1 * b1 + uv2 * b2) * w;
+
+                    color * texture.sample(uv)
+                }
+                None => color,
+            };
 
             ctx.set_pixel_depth(x, y, inv_w, color);
         }
@@ -407,6 +457,126 @@ mod tests {
                 red_at(&linear, x, 30)
             );
         }
+    }
+
+    /// Тот же треугольник, что в `render_gradient`, но вершины несут UV, а не
+    /// цвет: ближняя u = 0, дальние u = 1. Цвет везде белый, чтобы в кадре
+    /// оказалась чистая текстура без примеси освещения.
+    ///
+    /// Текстура — два текселя: левая половина чёрная, правая красная. Значит
+    /// на экране будет ровно одна граница, и её положение — это и есть
+    /// измеренное значение u
+    fn render_textured(w_far: f32) -> Vec<u8> {
+        let texture = Texture::new(
+            2,
+            1,
+            vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)],
+        );
+
+        let white = Vec3::new(1.0, 1.0, 1.0);
+        let textured = |ndc_x: f32, ndc_y: f32, w: f32, u: f32| {
+            ShadedVertex::new(
+                Vec4 {
+                    x: ndc_x * w,
+                    y: ndc_y * w,
+                    z: 0.0,
+                    w,
+                },
+                white,
+            )
+            .with_uv(Vec2::new(u, 0.0))
+        };
+
+        let mut frame = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+        let mut depth = vec![0.0f32; (WIDTH * HEIGHT) as usize];
+        let mut ctx = DrawContext::new(&mut frame, &mut depth, WIDTH, HEIGHT, [0, 0, 0, 255]);
+        ctx.texture = Some(&texture);
+
+        draw_triangle_filled(
+            textured(-0.8, 0.0, 1.0, 0.0),
+            textured(0.8, 0.0, w_far, 1.0),
+            textured(0.8, 0.8, w_far, 1.0),
+            &mut ctx,
+        );
+
+        frame
+    }
+
+    /// Первый столбец строки, где текстура сменилась с чёрной на красную.
+    /// Строка 45 выбрана так, чтобы весь диапазон 22..89 лежал внутри
+    /// треугольника — иначе «не закрашено» спуталось бы с «чёрный тексель»
+    fn texture_boundary_column(frame: &[u8]) -> u32 {
+        (22..89)
+            .find(|x| red_at(frame, *x, 45) > 0)
+            .expect("красная половина текстуры не попала в кадр")
+    }
+
+    #[test]
+    fn texture_lookup_is_perspective_correct() {
+        // Ожидание считается из формулы, а не подсматривается у растеризатора.
+        //
+        // Дальние вершины отодвинуты в 9 раз. Перспективно верное значение
+        // атрибута в пикселе: u = sum(b*u/w) / sum(b/w). Ближняя вершина имеет
+        // u = 0 при w = 1, дальние — u = 1 при w = 9, значит
+        //
+        //     u = ((1 - b0) / 9) / (b0 + (1 - b0) / 9)
+        //
+        // где b0 — вес ближней вершины. Граница текселей на u = 0.5:
+        //
+        //     (1 - b0) / 9 = 0.5 * (b0 + (1 - b0) / 9)   ->   b0 = 0.1
+        //
+        // Обе дальние вершины стоят на общей вертикали x = 90, поэтому
+        // b0 = (90 - x) / 80, и b0 = 0.1 попадает на x = 82. Первый красный
+        // столбец — 82: у пикселя 81 центр 81.5, там b0 = 0.10625 и u < 0.5.
+        //
+        // Без поправки u был бы просто (1 - b0), граница легла бы на b0 = 0.5,
+        // то есть на x = 50. Тридцать два столбца разницы — промахнуться
+        // мимо такой поломки невозможно
+        assert_eq!(texture_boundary_column(&render_textured(9.0)), 82);
+    }
+
+    #[test]
+    fn equal_w_degenerates_the_texture_lookup_to_linear() {
+        // Контроль к предыдущему тесту: если все вершины на одной глубине,
+        // делить не на что и поправка обязана исчезнуть. Тогда u = 1 - b0,
+        // граница на b0 = 0.5, то есть на x = 50: у пикселя 49 центр 49.5,
+        // b0 = 0.50625 и u ещё меньше половины
+        assert_eq!(texture_boundary_column(&render_textured(1.0)), 50);
+    }
+
+    #[test]
+    fn texture_modulates_the_lit_color_instead_of_replacing_it() {
+        // Полностью белая текстура на затенённой вдвое поверхности обязана
+        // дать серый, а не белый. Иначе текстурированные объекты перестали бы
+        // реагировать на свет, и вся сцена стала бы плоской
+        let texture = Texture::new(1, 1, vec![Vec3::new(1.0, 1.0, 1.0)]);
+
+        let half_lit = |ndc_x: f32, ndc_y: f32| {
+            ShadedVertex::new(
+                Vec4 {
+                    x: ndc_x,
+                    y: ndc_y,
+                    z: 0.0,
+                    w: 1.0,
+                },
+                Vec3::new(0.5, 0.5, 0.5),
+            )
+        };
+
+        let mut frame = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+        let mut depth = vec![0.0f32; (WIDTH * HEIGHT) as usize];
+        let mut ctx = DrawContext::new(&mut frame, &mut depth, WIDTH, HEIGHT, [0, 0, 0, 255]);
+        ctx.texture = Some(&texture);
+
+        draw_triangle_filled(
+            half_lit(-0.8, -0.8),
+            half_lit(0.8, -0.8),
+            half_lit(0.8, 0.8),
+            &mut ctx,
+        );
+
+        // 0.5 * 1.0 = 0.5 -> 127 (усечение, а не округление)
+        assert_eq!(red_at(&frame, 70, 60), 127);
     }
 
     #[test]

@@ -2,13 +2,12 @@ use std::rc::Rc;
 
 use crate::{
     clipping::clip_triangle_near,
-    config::{
-        AMBIENT_LIGHT, DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, LIGHT_DIRECTION, LINE_COLOR,
-    },
-    math::{Mat4, Vec3, Vec4},
+    config::{AMBIENT_LIGHT, DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, LIGHT_DIRECTION, LINE_COLOR},
+    math::{Mat4, Vec2, Vec3, Vec4},
     renderer::{
         DrawContext, ShadedVertex, draw_triangle_filled, draw_triangle_wireframe, is_backface,
     },
+    texture::Texture,
 };
 
 /// Цвет из байтов в вектор с компонентами 0..1.
@@ -25,16 +24,28 @@ fn unpack_color(color: [u8; 4]) -> Vec3 {
 ///
 /// Раньше меш хранил голые позиции, а нормаль считалась в цикле отрисовки
 /// заново на каждый кадр. Теперь атрибут живёт рядом с позицией и едет по
-/// пайплайну вместе с ней — сюда же со временем добавятся UV и цвет.
+/// пайплайну вместе с ней — сюда же со временем добавится цвет вершины.
 #[derive(Debug, Clone, Copy)]
 pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
+    /// Развёртка: какая точка текстуры приклеена к этой вершине.
+    /// У мешей без развёртки — нули
+    pub uv: Vec2,
 }
 
 impl Vertex {
     pub fn new(position: Vec3, normal: Vec3) -> Self {
-        Self { position, normal }
+        Self {
+            position,
+            normal,
+            uv: Vec2::ZERO,
+        }
+    }
+
+    pub fn with_uv(mut self, uv: Vec2) -> Self {
+        self.uv = uv;
+        self
     }
 }
 
@@ -58,10 +69,25 @@ impl Mesh {
     /// поверхностей (сферы, ландшафта) вершины, наоборот, разделяются между
     /// гранями — там индексный буфер и начинает окупаться.
     pub fn flat_shaded(positions: &[Vec3], triangles: &[[usize; 3]]) -> Self {
+        Self::flat_shaded_uv(positions, triangles, &[])
+    }
+
+    /// То же самое, но с развёрткой: `uvs[i]` — текстурные координаты трёх
+    /// углов треугольника `triangles[i]`.
+    ///
+    /// UV задаётся ПО ТРЕУГОЛЬНИКАМ, а не по позициям, и это не прихоть.
+    /// Развёртка почти всегда рвётся там же, где и нормаль: угол куба на
+    /// картинке-развёртке — это три разные точки, по одной на грань. Раз
+    /// вершины здесь и так расщепляются, дать каждой копии своё UV ничего
+    /// не стоит, а привязка к общей позиции сделала бы это невозможным.
+    ///
+    /// Короткий (или пустой) список — не ошибка: у треугольников без записи
+    /// UV остаётся нулевым. Так `flat_shaded` продолжает работать как раньше
+    pub fn flat_shaded_uv(positions: &[Vec3], triangles: &[[usize; 3]], uvs: &[[Vec2; 3]]) -> Self {
         let mut out_vertices = Vec::with_capacity(triangles.len() * 3);
         let mut out_triangles = Vec::with_capacity(triangles.len());
 
-        for triangle in triangles {
+        for (i, triangle) in triangles.iter().enumerate() {
             let a = positions[triangle[0]];
             let b = positions[triangle[1]];
             let c = positions[triangle[2]];
@@ -69,11 +95,13 @@ impl Mesh {
             // Обход против часовой стрелки снаружи -> нормаль наружу
             let normal = (b - a).cross(&(c - a)).normalize();
 
+            let uv = uvs.get(i).copied().unwrap_or([Vec2::ZERO; 3]);
+
             let base = out_vertices.len();
 
-            out_vertices.push(Vertex::new(a, normal));
-            out_vertices.push(Vertex::new(b, normal));
-            out_vertices.push(Vertex::new(c, normal));
+            out_vertices.push(Vertex::new(a, normal).with_uv(uv[0]));
+            out_vertices.push(Vertex::new(b, normal).with_uv(uv[1]));
+            out_vertices.push(Vertex::new(c, normal).with_uv(uv[2]));
 
             out_triangles.push([base, base + 1, base + 2]);
         }
@@ -145,38 +173,59 @@ impl Mesh {
     }
 
     pub fn create_cube() -> Self {
-        Self::flat_shaded(
-            &[
-                Vec3::new(-1.0, -1.0, -1.0), // 0
-                Vec3::new(1.0, -1.0, -1.0),  // 1
-                Vec3::new(1.0, 1.0, -1.0),   // 2
-                Vec3::new(-1.0, 1.0, -1.0),  // 3
-                Vec3::new(-1.0, -1.0, 1.0),  // 4
-                Vec3::new(1.0, -1.0, 1.0),   // 5
-                Vec3::new(1.0, 1.0, 1.0),    // 6
-                Vec3::new(-1.0, 1.0, 1.0),   // 7
-            ],
-            &[
-                // Back (-Z)
-                [0, 2, 1],
-                [0, 3, 2],
-                // Front (+Z)
-                [4, 5, 6],
-                [4, 6, 7],
-                // Bottom (-Y)
-                [0, 1, 5],
-                [0, 5, 4],
-                // Top (+Y)
-                [3, 6, 2],
-                [3, 7, 6],
-                // Left (-X)
-                [0, 7, 3],
-                [0, 4, 7],
-                // Right (+X)
-                [1, 6, 5],
-                [1, 2, 6],
-            ],
-        )
+        let positions = [
+            Vec3::new(-1.0, -1.0, -1.0), // 0
+            Vec3::new(1.0, -1.0, -1.0),  // 1
+            Vec3::new(1.0, 1.0, -1.0),   // 2
+            Vec3::new(-1.0, 1.0, -1.0),  // 3
+            Vec3::new(-1.0, -1.0, 1.0),  // 4
+            Vec3::new(1.0, -1.0, 1.0),   // 5
+            Vec3::new(1.0, 1.0, 1.0),    // 6
+            Vec3::new(-1.0, 1.0, 1.0),   // 7
+        ];
+
+        // Грань задаётся четвёркой углов, а не двумя тройками, потому что
+        // развёртка мыслит четырёхугольниками: каждой грани отдаётся весь
+        // квадрат текстуры целиком.
+        //
+        // Порядок углов — против часовой стрелки при взгляде СНАРУЖИ, начиная
+        // с левого нижнего угла картинки на этой грани. Первое условие даёт
+        // нормаль наружу (иначе грань отбракует `is_backface`), второе — что
+        // текстура на грани стоит ровно, а не боком. Проверять их приходится
+        // руками: перепутанный угол не вызовет ошибки, он просто повернёт
+        // картинку, и заметно это будет только на несимметричной текстуре
+        const FACES: [[usize; 4]; 6] = [
+            [1, 0, 3, 2], // Back (-Z): смотрим со стороны -Z, «вправо» = -X
+            [4, 5, 6, 7], // Front (+Z)
+            [0, 1, 5, 4], // Bottom (-Y): «вверх» картинки = +Z
+            [7, 6, 2, 3], // Top (+Y): «вверх» картинки = -Z
+            [0, 4, 7, 3], // Left (-X)
+            [5, 1, 2, 6], // Right (+X)
+        ];
+
+        // Углы квадрата текстуры в том же порядке. v растёт вниз, поэтому
+        // левый НИЖНИЙ угол грани — это v = 1
+        const QUAD_UV: [Vec2; 4] = [
+            Vec2::new(0.0, 1.0),
+            Vec2::new(1.0, 1.0),
+            Vec2::new(1.0, 0.0),
+            Vec2::new(0.0, 0.0),
+        ];
+
+        let mut triangles = Vec::with_capacity(12);
+        let mut uvs = Vec::with_capacity(12);
+
+        for face in FACES {
+            // Четырёхугольник режется по диагонали a-c: оба треугольника
+            // начинаются с общего угла a
+            triangles.push([face[0], face[1], face[2]]);
+            triangles.push([face[0], face[2], face[3]]);
+
+            uvs.push([QUAD_UV[0], QUAD_UV[1], QUAD_UV[2]]);
+            uvs.push([QUAD_UV[0], QUAD_UV[2], QUAD_UV[3]]);
+        }
+
+        Self::flat_shaded_uv(&positions, &triangles, &uvs)
     }
 
     /// UV-сфера радиуса 1: `stacks` колец по широте, `slices` долей по долготе.
@@ -271,6 +320,10 @@ pub struct Instance {
     // индекс совпадает с mesh.triangles
     pub face_colors: Option<Vec<[u8; 4]>>,
 
+    /// Текстура объекта. За Rc по той же причине, что и меш: одну картинку
+    /// разделяют десятки инстансов, копировать её на каждый незачем
+    pub texture: Option<Rc<Texture>>,
+
     pub wireframe: bool,
 }
 
@@ -283,6 +336,7 @@ impl Instance {
             scale: Vec3::new(1.0, 1.0, 1.0),
             color: LINE_COLOR,
             face_colors: None,
+            texture: None,
             wireframe: false,
         }
     }
@@ -294,6 +348,17 @@ impl Instance {
     /// Раскраска по индексу треугольников
     pub fn with_face_colors(mut self, colors: Vec<[u8; 4]>) -> Self {
         self.face_colors = Some(colors);
+        self
+    }
+
+    /// Натянуть текстуру.
+    ///
+    /// Цвет инстанса при этом не отменяется, а умножается на тексель: белый
+    /// (255, 255, 255) отдаёт картинку как есть, любой другой её подкрашивает.
+    /// Смысла в текстуре не будет, если у меша нет развёртки — тогда все UV
+    /// нулевые и вся поверхность прочитает один и тот же левый верхний тексель
+    pub fn with_texture(mut self, texture: impl Into<Rc<Texture>>) -> Self {
+        self.texture = Some(texture.into());
         self
     }
 
@@ -380,6 +445,11 @@ impl Scene {
             let model_matrix = instance.get_model_matrix();
             let mvp_matrix = &vp_matrix * &model_matrix;
 
+            // Текстура — состояние на весь инстанс, как и на GPU: она
+            // «привязывается» один раз перед отрисовкой объекта, а не
+            // передаётся в каждый треугольник
+            ctx.texture = instance.texture.as_deref();
+
             // Вершинный этап: позиция уходит в clip space, а нормаль сразу
             // превращается в яркость. Это и есть затенение по Гуро — свет
             // считается в вершинах, дальше по грани его протянет интерполяция.
@@ -429,6 +499,7 @@ impl Scene {
                 let base = unpack_color(base_color);
                 let shaded = |index: usize| {
                     ShadedVertex::new(clip_vertices[index], base * intensities[index])
+                        .with_uv(instance.mesh.vertices[index].uv)
                 };
 
                 // Режем по ближней плоскости и растеризуем осколки

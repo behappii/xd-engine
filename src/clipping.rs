@@ -92,6 +92,10 @@ pub fn lerp_shaded(a: ShadedVertex, b: ShadedVertex, t: f32) -> ShadedVertex {
     ShadedVertex {
         clip_position: lerp_vec4(a.clip_position, b.clip_position, t),
         color: a.color + (b.color - a.color) * t,
+        // UV режется вместе со всем остальным. Забыть здесь атрибут — значит
+        // получить его скачок ровно на линии среза: у обрезанных треугольников
+        // текстура поехала бы, у целых нет
+        uv: a.uv + (b.uv - a.uv) * t,
     }
 }
 
@@ -150,7 +154,7 @@ pub fn clip_triangle_near(triangle: [ShadedVertex; 3]) -> ([[ShadedVertex; 3]; 2
 mod tests {
     use super::*;
 
-    use crate::math::Vec3;
+    use crate::math::{Vec2, Vec3};
 
     /// Вершина в clip space с w = 1: тогда «внутри near» означает просто z >= -1
     fn v(x: f32, y: f32, z: f32) -> Vec4 {
@@ -249,7 +253,53 @@ mod tests {
             }
         }
 
-        assert!(saw_intermediate, "ни одна вершина среза не получила промежуточный цвет");
+        assert!(
+            saw_intermediate,
+            "ни одна вершина среза не получила промежуточный цвет"
+        );
+    }
+
+    #[test]
+    fn clipping_interpolates_uv_along_the_cut_edge() {
+        // То же самое, что и для цвета, но для развёртки. Атрибут легко
+        // добавить в ShadedVertex и забыть протащить сюда: целые треугольники
+        // будут текстурироваться правильно, а обрезанные — поедут, и заметно
+        // это станет только когда объект наполовину заедет за камеру.
+        //
+        // Ребро от вершины с u = 0 (внутри, z = 0) к вершине с u = 1
+        // (снаружи, z = -3). Near-плоскость при w = 1 стоит на z = -1, то есть
+        // на трети ребра: срез обязан получить u = 1/3
+        let inside = ShadedVertex::new(v(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0))
+            .with_uv(Vec2::new(0.0, 0.0));
+        let outside = ShadedVertex::new(v(0.0, 1.0, -3.0), Vec3::new(1.0, 1.0, 1.0))
+            .with_uv(Vec2::new(1.0, 0.0));
+        let third = ShadedVertex::new(v(1.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0))
+            .with_uv(Vec2::new(0.0, 0.0));
+
+        let (triangles, count) = clip_triangle_near([inside, third, outside]);
+
+        assert!(count > 0);
+
+        let mut cut_uvs: Vec<f32> = Vec::new();
+
+        for triangle in &triangles[..count] {
+            for vertex in triangle {
+                // Вершины среза — те, что легли ровно на плоскость
+                if plane_distance(&vertex.clip_position, Plane::Near).abs() < EPSILON {
+                    cut_uvs.push(vertex.uv.x);
+                }
+            }
+        }
+
+        assert!(!cut_uvs.is_empty(), "срез не породил ни одной вершины");
+
+        for u in cut_uvs {
+            assert!(
+                (u - 1.0 / 3.0).abs() < EPSILON,
+                "на срезе u = {}, а ребро пересекает плоскость на трети",
+                u
+            );
+        }
     }
 
     #[test]
