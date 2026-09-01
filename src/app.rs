@@ -1,6 +1,9 @@
 use crate::config::{CLEAR_COLOR, HEIGHT, RENDER_SCALE, WIDTH, WINDOW_TITLE};
 use crate::renderer::clear_frame;
-use crate::{fps_counter::FpsCounter, scene::Scene};
+use crate::{
+    fps_counter::FpsCounter,
+    scene::{Assets, Scene},
+};
 use pixels::{Pixels, SurfaceTexture};
 use std::collections::HashSet;
 use std::{sync::Arc, time::Instant};
@@ -19,6 +22,12 @@ pub struct EngineApp {
 
     // публичная сцена, которую можно настраивать снаружи
     pub scene: Scene,
+
+    /// Меши и текстуры. Живут рядом со сценой, а не внутри неё: ресурсы
+    /// переживают любую отдельную сцену, и когда сцен станет несколько —
+    /// главное меню, уровень, пауза, — арены останутся общими, а `MeshId`
+    /// будет действителен во всех
+    pub assets: Assets,
     last_time: Instant,
     pressed_keys: HashSet<KeyCode>, // нажатые клавиши
 
@@ -47,6 +56,7 @@ impl EngineApp {
             pixels: None,
             last_time: Instant::now(),
             scene: Scene::new(),
+            assets: Assets::new(),
             pressed_keys: HashSet::new(),
             update_callback: None,
             depth_buffer: Vec::new(),
@@ -232,6 +242,7 @@ impl ApplicationHandler for EngineApp {
                 // константы: от них зависит и индексация пикселей,
                 // и aspect матрицы проекции внутри draw
                 self.scene.draw(
+                    &self.assets,
                     frame,
                     &mut self.depth_buffer,
                     self.frame_width,

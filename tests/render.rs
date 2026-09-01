@@ -6,24 +6,57 @@ use std::collections::HashSet;
 
 use xd_engine::{
     math::Vec3,
-    scene::{Instance, Mesh, Scene, TextureId},
+    scene::{Assets, Instance, Mesh, MeshId, Scene, TextureId},
     texture::Texture,
 };
+
+/// Сцена вместе со своими ресурсами.
+///
+/// Ресурсы и мир разделены в движке нарочно — арены переживают любую отдельную
+/// сцену. Но в тестах они всегда ходят парой, поэтому держим их рядом, чтобы
+/// каждый тест не таскал два значения и не забывал их сопоставлять
+struct World {
+    assets: Assets,
+    scene: Scene,
+}
+
+impl World {
+    fn new() -> Self {
+        Self {
+            assets: Assets::new(),
+            scene: Scene::new(),
+        }
+    }
+
+    fn add_mesh(&mut self, mesh: Mesh) -> MeshId {
+        self.assets.add_mesh(mesh)
+    }
+
+    fn add_texture(&mut self, texture: Texture) -> TextureId {
+        self.assets.add_texture(texture)
+    }
+
+    fn add_instance(&mut self, instance: Instance) {
+        self.scene.add_instance(instance);
+    }
+}
 
 const WIDTH: u32 = 200;
 const HEIGHT: u32 = 150;
 
-fn render_at(scene: &Scene, width: u32, height: u32) -> Vec<u8> {
+fn render_at(world: &World, width: u32, height: u32) -> Vec<u8> {
     let mut frame = vec![0u8; (width * height * 4) as usize];
     let mut depth = vec![0.0f32; (width * height) as usize];
 
-    scene.draw(&mut frame, &mut depth, width, height);
+    world
+        .scene
+        .draw(&world.assets, &mut frame, &mut depth, width, height);
 
     frame
 }
 
-fn render(scene: &Scene) -> Vec<u8> {
-    render_at(scene, WIDTH, HEIGHT)
+fn render(world: &World) -> Vec<u8> {
+    render_at(world, WIDTH, HEIGHT)
 }
 
 /// Цвета всех закрашенных пикселей. Фон — нули, его отбрасываем.
@@ -41,8 +74,8 @@ fn face_colors(frame: &[u8]) -> HashSet<[u8; 4]> {
 ///
 /// Меш регистрируется в сцене прямо здесь: инстанс хранит только MeshId,
 /// и без своей сцены он ничего не значит
-fn tilted_cube(scene: &mut Scene, position: Vec3) -> Instance {
-    let mesh = scene.add_mesh(Mesh::create_cube());
+fn tilted_cube(world: &mut World, position: Vec3) -> Instance {
+    let mesh = world.add_mesh(Mesh::create_cube());
     let mut cube = Instance::new(mesh, position).with_color([255, 255, 255, 255]);
 
     cube.rotation = Vec3::new(20.0, 35.0, 0.0);
@@ -52,7 +85,7 @@ fn tilted_cube(scene: &mut Scene, position: Vec3) -> Instance {
 
 #[test]
 fn scene_with_a_cube_actually_draws_pixels() {
-    let mut scene = Scene::new();
+    let mut scene = World::new();
     let cube = tilted_cube(&mut scene, Vec3::new(0.0, 0.0, 0.0));
     scene.add_instance(cube);
 
@@ -64,14 +97,14 @@ fn scene_with_a_cube_actually_draws_pixels() {
 
 #[test]
 fn empty_scene_leaves_the_buffer_untouched() {
-    let frame = render(&Scene::new());
+    let frame = render(&World::new());
 
     assert!(frame.iter().all(|byte| *byte == 0));
 }
 
 #[test]
 fn flat_shading_gives_one_color_per_visible_face() {
-    let mut scene = Scene::new();
+    let mut scene = World::new();
     let cube = tilted_cube(&mut scene, Vec3::new(0.0, 0.0, 0.0));
     scene.add_instance(cube);
 
@@ -90,14 +123,14 @@ fn shading_does_not_depend_on_world_position() {
     // разошёлся бы
     let offset = Vec3::new(20.0, -13.0, 7.0);
 
-    let mut at_origin = Scene::new();
+    let mut at_origin = World::new();
     let cube = tilted_cube(&mut at_origin, Vec3::new(0.0, 0.0, 0.0));
     at_origin.add_instance(cube);
 
-    let mut far_away = Scene::new();
+    let mut far_away = World::new();
     let cube = tilted_cube(&mut far_away, offset);
     far_away.add_instance(cube);
-    far_away.camera_position = at_origin.camera_position + offset;
+    far_away.scene.camera_position = at_origin.scene.camera_position + offset;
 
     assert_eq!(
         face_colors(&render(&at_origin)),
@@ -109,7 +142,7 @@ fn shading_does_not_depend_on_world_position() {
 fn face_turned_towards_the_light_is_brighter_than_one_turned_away() {
     // Свет светит из (0.5, 1.0, 0.8) — сверху. Значит верхняя грань куба
     // должна быть светлее нижней, а не наоборот
-    let mut scene = Scene::new();
+    let mut scene = World::new();
 
     let cube_mesh = scene.add_mesh(Mesh::create_cube());
     let mut cube =
@@ -117,15 +150,15 @@ fn face_turned_towards_the_light_is_brighter_than_one_turned_away() {
     // Смотрим на куб сверху, чтобы верхняя грань попала в кадр
     cube.rotation = Vec3::new(0.0, 0.0, 0.0);
     scene.add_instance(cube);
-    scene.camera_position = Vec3::new(0.0, 5.0, 0.0001);
-    scene.pitch = -89.0;
-    scene.yaw = -90.0;
+    scene.scene.camera_position = Vec3::new(0.0, 5.0, 0.0001);
+    scene.scene.pitch = -89.0;
+    scene.scene.yaw = -90.0;
 
     let from_above = face_colors(&render(&scene));
 
     // Тот же куб снизу
-    scene.camera_position = Vec3::new(0.0, -5.0, 0.0001);
-    scene.pitch = 89.0;
+    scene.scene.camera_position = Vec3::new(0.0, -5.0, 0.0001);
+    scene.scene.pitch = 89.0;
 
     let from_below = face_colors(&render(&scene));
 
@@ -147,8 +180,8 @@ fn faceted_copy(smooth: &Mesh) -> Mesh {
     Mesh::flat_shaded(&positions, &smooth.triangles)
 }
 
-fn sphere_scene(mesh: Mesh) -> Scene {
-    let mut scene = Scene::new();
+fn sphere_scene(mesh: Mesh) -> World {
+    let mut scene = World::new();
 
     let id = scene.add_mesh(mesh);
     let mut sphere = Instance::new(id, Vec3::new(0.0, 0.0, 0.0)).with_color([255, 255, 255, 255]);
@@ -265,7 +298,7 @@ fn widening_the_viewport_adds_margins_instead_of_stretching() {
     // широкий кадр обязан дать фигуру ТОГО ЖЕ размера в пикселях, просто
     // с большими полями по бокам. Если бы aspect брался из константы,
     // а не из настоящего размера кадра, фигура растянулась бы вдвое
-    let mut scene = Scene::new();
+    let mut scene = World::new();
     let cube = tilted_cube(&mut scene, Vec3::new(0.0, 0.0, 0.0));
     scene.add_instance(cube);
 
@@ -300,7 +333,7 @@ fn taller_viewport_scales_the_picture_with_it() {
     // если зашить высоту в перевод NDC в пиксели константой, соседний тест
     // остаётся зелёным, а этот краснеет. Aspect же на вертикаль не влияет
     // вовсе, так что его поломки ловит именно соседний тест
-    let mut scene = Scene::new();
+    let mut scene = World::new();
     let cube = tilted_cube(&mut scene, Vec3::new(0.0, 0.0, 0.0));
     scene.add_instance(cube);
 
@@ -331,8 +364,8 @@ fn taller_viewport_scales_the_picture_with_it() {
 /// 60/255 — это точно 15/255, то есть граница между двумя байтами. Половина
 /// пикселей грани падала по одну сторону, половина по другую, и «6 оттенков»
 /// превращались в 7
-fn checker(scene: &mut Scene) -> TextureId {
-    scene.add_texture(Texture::checker(
+fn checker(world: &mut World) -> TextureId {
+    world.add_texture(Texture::checker(
         8,
         2,
         [255, 255, 255, 255],
@@ -351,7 +384,7 @@ fn texture_multiplies_the_number_of_shades_by_the_number_of_texels() {
     // грань прочитает один тексель и оттенков останется 3 (столько же, сколько
     // насчитал flat_shading_gives_one_color_per_visible_face). Если текстура
     // затирает свет вместо умножения, оттенков станет 2 — по числу клеток
-    let mut scene = Scene::new();
+    let mut scene = World::new();
     let texture = checker(&mut scene);
     let cube = tilted_cube(&mut scene, Vec3::new(0.0, 0.0, 0.0)).with_texture(texture);
     scene.add_instance(cube);
@@ -381,7 +414,7 @@ fn the_cube_unwrap_puts_the_texture_upright_on_the_face() {
         ],
     );
 
-    let mut scene = Scene::new();
+    let mut scene = World::new();
     let mesh = scene.add_mesh(Mesh::create_cube());
     let texture = scene.add_texture(texture);
     scene.add_instance(
@@ -436,11 +469,11 @@ fn a_white_texture_changes_nothing() {
     // Умножение на единицу обязано быть тождественным. Тест сторожит именно
     // то, что текстурная ветка не делает с цветом ничего лишнего — например,
     // не теряет перспективную коррекцию и не подмешивает собственную яркость
-    let mut plain = Scene::new();
+    let mut plain = World::new();
     let cube = tilted_cube(&mut plain, Vec3::new(0.0, 0.0, 0.0));
     plain.add_instance(cube);
 
-    let mut textured = Scene::new();
+    let mut textured = World::new();
     let white = textured.add_texture(Texture::checker(
         4,
         1,
@@ -459,11 +492,11 @@ fn an_instance_without_a_texture_is_unaffected_by_its_neighbour() {
     // Текстура — состояние, которое сцена переключает между инстансами.
     // Забыть сбросить его — классическая ошибка «протёкшего» стейта:
     // следующий объект отрисовался бы чужой картинкой
-    let mut alone = Scene::new();
+    let mut alone = World::new();
     let cube = tilted_cube(&mut alone, Vec3::new(0.0, 0.0, 0.0));
     alone.add_instance(cube);
 
-    let mut after_textured = Scene::new();
+    let mut after_textured = World::new();
     // Текстурированный куб стоит далеко в стороне и в кадр не попадает —
     // важно только то, что он обрабатывается раньше
     let texture = checker(&mut after_textured);
@@ -491,7 +524,7 @@ fn uv_beyond_one_tiles_the_texture() {
         vertex.uv = vertex.uv * 4.0;
     }
 
-    let mut tiled = Scene::new();
+    let mut tiled = World::new();
     let tiled_mesh = tiled.add_mesh(mesh);
     let tiled_texture = checker(&mut tiled);
     let mut instance = Instance::new(tiled_mesh, Vec3::new(0.0, 0.0, 0.0))
@@ -500,7 +533,7 @@ fn uv_beyond_one_tiles_the_texture() {
     instance.rotation = Vec3::new(20.0, 35.0, 0.0);
     tiled.add_instance(instance);
 
-    let mut plain = Scene::new();
+    let mut plain = World::new();
     let plain_texture = checker(&mut plain);
     let cube = tilted_cube(&mut plain, Vec3::new(0.0, 0.0, 0.0)).with_texture(plain_texture);
     plain.add_instance(cube);
@@ -615,7 +648,7 @@ fn the_sphere_unwrap_puts_the_top_of_the_texture_on_the_north_pole() {
     // симметричной текстуре не видно вовсе
     let texture = Texture::from_rgba8(1, 2, &[255, 0, 0, 255, /**/ 0, 0, 255, 255]);
 
-    let mut scene = Scene::new();
+    let mut scene = World::new();
     let mesh = scene.add_mesh(Mesh::create_sphere(16, 24));
     let texture = scene.add_texture(texture);
     let mut sphere = Instance::new(mesh, Vec3::new(0.0, 0.0, 0.0))
@@ -656,21 +689,30 @@ fn the_sphere_unwrap_puts_the_top_of_the_texture_on_the_north_pole() {
 /// Глубина сравнивается по битовому представлению, а не по значению: у f32
 /// NaN не равен сам себе, и обычное сравнение молча пропустило бы кадр,
 /// в котором расползлись именно они
-fn render_threads(scene: &Scene, width: u32, height: u32, threads: usize) -> (Vec<u8>, Vec<u32>) {
+fn render_threads(world: &World, width: u32, height: u32, threads: usize) -> (Vec<u8>, Vec<u32>) {
     let mut frame = vec![0u8; (width * height * 4) as usize];
     let mut depth = vec![0.0f32; (width * height) as usize];
 
-    scene.draw_with_threads(&mut frame, &mut depth, width, height, threads);
+    world.scene.draw_with_threads(
+        &world.assets,
+        &mut frame,
+        &mut depth,
+        width,
+        height,
+        threads,
+    );
 
     (frame, depth.iter().map(|d| d.to_bits()).collect())
 }
 
 /// То же, но через обычный `draw` — то есть на глобальном пуле rayon
-fn render_pooled(scene: &Scene, width: u32, height: u32) -> (Vec<u8>, Vec<u32>) {
+fn render_pooled(world: &World, width: u32, height: u32) -> (Vec<u8>, Vec<u32>) {
     let mut frame = vec![0u8; (width * height * 4) as usize];
     let mut depth = vec![0.0f32; (width * height) as usize];
 
-    scene.draw(&mut frame, &mut depth, width, height);
+    world
+        .scene
+        .draw(&world.assets, &mut frame, &mut depth, width, height);
 
     (frame, depth.iter().map(|d| d.to_bits()).collect())
 }
@@ -678,8 +720,8 @@ fn render_pooled(scene: &Scene, width: u32, height: u32) -> (Vec<u8>, Vec<u32>) 
 /// Сцена, в которой одновременно работают все три пути растеризатора:
 /// залитый треугольник, залитый С ТЕКСТУРОЙ и проволочный. Плюс перекрытия,
 /// чтобы тест глубины действительно что-то решал
-fn busy_scene() -> Scene {
-    let mut scene = Scene::new();
+fn busy_scene() -> World {
+    let mut scene = World::new();
 
     // Один меш на два инстанса — теперь это просто копия числа
     let cube = scene.add_mesh(Mesh::create_cube());
@@ -801,7 +843,7 @@ fn instances_are_drawn_in_the_order_they_were_added() {
     // Побайтовое сравнение потоков такую ошибку не поймает: перестановка
     // применилась бы одинаково и к однопоточной ветке, и к многопоточной,
     // и кадры остались бы равны друг другу — просто оба неправильные
-    let mut scene = Scene::new();
+    let mut scene = World::new();
 
     let filled = tilted_cube(&mut scene, Vec3::new(0.0, 0.0, 0.0));
     scene.add_instance(filled);
@@ -826,5 +868,122 @@ fn instances_are_drawn_in_the_order_they_were_added() {
     assert!(
         green(&frame) > 0,
         "проволоки не видно: значит её нарисовали ДО залитого куба"
+    );
+}
+
+/// Куб заданного цвета и размера в заданной точке
+fn coloured_cube(mesh: MeshId, position: Vec3, scale: f32, color: [u8; 4]) -> Instance {
+    let mut cube = Instance::new(mesh, position).with_color(color);
+    cube.scale = Vec3::new(scale, scale, scale);
+    cube
+}
+
+/// Цвет пикселя в середине кадра
+fn center_pixel(frame: &[u8]) -> [u8; 3] {
+    let i = (((HEIGHT / 2) * WIDTH + WIDTH / 2) * 4) as usize;
+    [frame[i], frame[i + 1], frame[i + 2]]
+}
+
+#[test]
+fn two_scenes_share_one_set_of_assets() {
+    // Ради этого ресурсы и отделены от сцены. Главное меню и уровень — это две
+    // сцены, но куб в них один и тот же, и пересоздавать его при переходе
+    // незачем. Пока арены жили внутри сцены, `MeshId` был действителен только
+    // в своей: индекс из чужой сцены молча брал не тот меш, а то и выходил
+    // за границу
+    let mut assets = Assets::new();
+    let cube = assets.add_mesh(Mesh::create_cube());
+
+    // Один и тот же MeshId уходит в две независимые сцены
+    let mut first = Scene::new();
+    first.add_instance(coloured_cube(
+        cube,
+        Vec3::new(0.0, 0.0, 0.0),
+        0.6,
+        [255, 255, 255, 255],
+    ));
+
+    let mut second = Scene::new();
+    second.add_instance(coloured_cube(
+        cube,
+        Vec3::new(0.0, 0.0, 0.0),
+        0.6,
+        [255, 255, 255, 255],
+    ));
+
+    let render = |scene: &Scene| {
+        let mut frame = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+        let mut depth = vec![0.0f32; (WIDTH * HEIGHT) as usize];
+        scene.draw(&assets, &mut frame, &mut depth, WIDTH, HEIGHT);
+        frame
+    };
+
+    let a = render(&first);
+    let b = render(&second);
+
+    assert!(
+        a.chunks_exact(4).any(|p| p[3] != 0),
+        "сцена пустая — тест ничего не проверяет"
+    );
+    assert!(
+        a == b,
+        "один и тот же меш в двух сценах дал разную картинку"
+    );
+}
+
+#[test]
+fn a_second_scene_can_be_drawn_over_the_first() {
+    // Внутриигровое меню поверх работающей игры. Отдельного механизма для
+    // этого не нужно: `draw` пишет в переданные буферы, поэтому в один кадр
+    // можно нарисовать сколько угодно сцен подряд. Мир при этом не трогают —
+    // он просто не получает свой update и замирает.
+    //
+    // Единственная тонкость — глубина. Меню специально стоит ДАЛЬШЕ мира, и
+    // без очистки depth-буфера тест глубины его отбракует. Очистка между
+    // сценами и есть то, что делает вторую сцену наложением, а не частью мира
+    let mut assets = Assets::new();
+    let cube = assets.add_mesh(Mesh::create_cube());
+
+    let mut world = Scene::new();
+    world.add_instance(coloured_cube(
+        cube,
+        Vec3::new(0.0, 0.0, 0.0),
+        0.6,
+        [255, 255, 255, 255],
+    ));
+
+    // Дальше по Z, но крупнее — на экране накрывает мир целиком
+    let mut menu = Scene::new();
+    menu.add_instance(coloured_cube(
+        cube,
+        Vec3::new(0.0, 0.0, -3.0),
+        1.5,
+        [255, 0, 0, 255],
+    ));
+
+    let mut frame = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+    let mut depth = vec![0.0f32; (WIDTH * HEIGHT) as usize];
+
+    world.draw(&assets, &mut frame, &mut depth, WIDTH, HEIGHT);
+    menu.draw(&assets, &mut frame, &mut depth, WIDTH, HEIGHT);
+
+    let hidden = center_pixel(&frame);
+    assert!(
+        hidden[0] == hidden[1] && hidden[1] == hidden[2],
+        "без очистки глубины меню обязано остаться за миром, а вышло {hidden:?}"
+    );
+
+    // Теперь то же самое, но глубина сбрасывается между сценами
+    let mut frame = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+    let mut depth = vec![0.0f32; (WIDTH * HEIGHT) as usize];
+
+    world.draw(&assets, &mut frame, &mut depth, WIDTH, HEIGHT);
+    depth.fill(0.0);
+    menu.draw(&assets, &mut frame, &mut depth, WIDTH, HEIGHT);
+
+    let shown = center_pixel(&frame);
+    assert!(
+        shown[0] > 0 && shown[1] == 0 && shown[2] == 0,
+        "после очистки глубины меню обязано лечь поверх, а вышло {shown:?}"
     );
 }

@@ -9,12 +9,14 @@
 //! каждом `cargo build --examples`, так что README не сможет молча разойтись
 //! с настоящим API.
 
-use winit::event_loop::EventLoop;
+// winit берётся через реэкспорт движка, а не своей зависимостью:
+// так его версия заведомо совпадает с той, на которой собран xd_engine
 use xd_engine::{
     app::EngineApp,
     math::Vec3,
     scene::{Instance, Mesh},
     texture::Texture,
+    winit::event_loop::EventLoop,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,8 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Меш и текстура отдаются сцене один раз. Обратно приходят хендлы —
     // обычные числа, Copy: раздавай их скольким угодно объектам
-    let cube = app.scene.add_mesh(Mesh::create_cube());
-    let checker = app.scene.add_texture(Texture::checker(
+    let cube = app.assets.add_mesh(Mesh::create_cube());
+    let checker = app.assets.add_texture(Texture::checker(
         64,
         8,
         [230, 230, 230, 255],

@@ -440,35 +440,34 @@ impl Instance {
     }
 }
 
-pub struct Scene {
-    /// Арена мешей. Сцена ими владеет, инстансы держат только индексы —
-    /// поэтому в сцене нет ни одного разделяемого указателя, и её целиком
-    /// можно одолжить сразу нескольким потокам
+/// Арены мешей и текстур: всё, что дорого создавать и не принадлежит одной
+/// конкретной сцене.
+///
+/// Отделено от [`Scene`] потому, что у ресурсов и у мира разные сроки жизни.
+/// Главное меню и уровень — это две сцены, но куб в них один и тот же, и
+/// пересоздавать его при переходе бессмысленно. Пока арены жили внутри сцены,
+/// смена сцены выбрасывала вместе с миром все меши и текстуры, а внутриигровое
+/// меню поверх игры было не сделать вовсе: чтобы показать меню, пришлось бы
+/// уничтожить мир вместе с состоянием игры.
+///
+/// Второе следствие важнее на вид: `MeshId` теперь действителен везде. Пока
+/// арена была у каждой сцены своя, индекс из одной сцены, применённый в
+/// другой, молча брал не тот меш — с общими аренами «чужой сцены» просто нет.
+///
+/// Разделяемых указателей внутри нет — только `Vec` простых данных, — поэтому
+/// `&Assets` можно одолжить сразу нескольким потокам
+#[derive(Debug, Default, Clone)]
+pub struct Assets {
     meshes: Vec<Mesh>,
-    /// Арена текстур, по той же схеме
     textures: Vec<Texture>,
-    // массив инстансов
-    pub instances: Vec<Instance>,
-    // камера
-    pub camera_position: Vec3,
-    pub yaw: f32,   // поворот камеры влево/вправо в градусах
-    pub pitch: f32, // камера вверх/вниз в градусах
 }
 
-impl Scene {
-    // Создание сцены
+impl Assets {
     pub fn new() -> Self {
-        Self {
-            meshes: Vec::new(),
-            textures: Vec::new(),
-            instances: Vec::new(),
-            camera_position: Vec3::new(0.0, 0.0, 5.0),
-            yaw: -90.0,
-            pitch: 0.0,
-        }
+        Self::default()
     }
 
-    /// Отдать меш сцене и получить ссылку на него.
+    /// Отдать меш аренам и получить ссылку на него.
     ///
     /// Ссылку можно копировать сколько угодно: она `Copy`, и каждый инстанс
     /// хранит у себя всего одно число
@@ -491,10 +490,9 @@ impl Scene {
 
     /// Изменить меш на месте — например деформировать вершины.
     ///
-    /// Правка достанется ВСЕМ инстансам с этим `MeshId`. Чтобы изменить
-    /// только один объект, зарегистрируй копию: `let id = scene.add_mesh(
-    /// scene.mesh(base).clone())`. Раньше это делал `Rc::make_mut`, который
-    /// клонировал молча — теперь копия видна в коде
+    /// Правка достанется ВСЕМ инстансам с этим `MeshId`, во всех сценах.
+    /// Чтобы изменить только один объект, зарегистрируй копию:
+    /// `let id = assets.add_mesh(assets.mesh(base).clone())`
     pub fn mesh_mut(&mut self, id: MeshId) -> &mut Mesh {
         &mut self.meshes[id.0]
     }
@@ -502,17 +500,44 @@ impl Scene {
     pub fn texture(&self, id: TextureId) -> &Texture {
         &self.textures[id.0]
     }
+}
+
+/// Мир: что где стоит и откуда на это смотрят.
+///
+/// Ресурсов не держит — только ссылки на них, поэтому сцен может быть сколько
+/// угодно и переключаются они даром. Меню поверх игры рисуется двумя вызовами
+/// `draw` в один и тот же буфер
+pub struct Scene {
+    // массив инстансов
+    pub instances: Vec<Instance>,
+    // камера
+    pub camera_position: Vec3,
+    pub yaw: f32,   // поворот камеры влево/вправо в градусах
+    pub pitch: f32, // камера вверх/вниз в градусах
+}
+
+impl Scene {
+    // Создание сцены
+    pub fn new() -> Self {
+        Self {
+            instances: Vec::new(),
+            camera_position: Vec3::new(0.0, 0.0, 5.0),
+            yaw: -90.0,
+            pitch: 0.0,
+        }
+    }
 
     pub fn add_instance(&mut self, instance: Instance) {
         self.instances.push(instance);
     }
 
-    /// Короткий путь для меша, который нужен ровно одному объекту: регистрирует
-    /// его и сразу заводит инстанс. Возвращает ссылку на инстанс, чтобы можно
-    /// было донастроить масштаб и поворот
-    pub fn spawn(&mut self, mesh: Mesh, position: Vec3) -> &mut Instance {
-        let id = self.add_mesh(mesh);
-        self.instances.push(Instance::new(id, position));
+    /// Завести инстанс и сразу получить ссылку на него.
+    ///
+    /// Нужно потому, что масштаб и поворот — это поля, а не методы-строители:
+    /// без такой ссылки пришлось бы заводить временную переменную ради двух
+    /// присваиваний
+    pub fn spawn(&mut self, mesh: MeshId, position: Vec3) -> &mut Instance {
+        self.instances.push(Instance::new(mesh, position));
 
         self.instances.last_mut().expect("только что добавили")
     }
@@ -524,11 +549,18 @@ impl Scene {
     /// чем кажется: раньше здесь был `thread::scope`, и потоки создавались
     /// заново каждый кадр — на 12 потоках это стоило около 0.2 мс, то есть
     /// больше, чем весь вершинный этап
-    pub fn draw(&self, frame: &mut [u8], depth: &mut [f32], width: u32, height: u32) {
+    pub fn draw(
+        &self,
+        assets: &Assets,
+        frame: &mut [u8],
+        depth: &mut [f32],
+        width: u32,
+        height: u32,
+    ) {
         // Геометрия считается один раз на кадр, а не в каждой полосе: полос
         // десятки, и повторять вершинный этап для каждой было бы вернейшим
         // способом сделать «многопоточность», которая медленнее исходника
-        let jobs = self.build_raster_jobs(width, height, true);
+        let jobs = self.build_raster_jobs(assets, width, height, true);
 
         rasterize(frame, depth, width, height, &jobs, true);
     }
@@ -540,8 +572,15 @@ impl Scene {
     /// пиксель пишет ровно один поток, и порядок треугольников внутри полосы
     /// тот же — значит совпадение должно быть точным, а не «на глаз».
     /// Расхождение означает гонку
-    pub fn draw_serial(&self, frame: &mut [u8], depth: &mut [f32], width: u32, height: u32) {
-        let jobs = self.build_raster_jobs(width, height, false);
+    pub fn draw_serial(
+        &self,
+        assets: &Assets,
+        frame: &mut [u8],
+        depth: &mut [f32],
+        width: u32,
+        height: u32,
+    ) {
+        let jobs = self.build_raster_jobs(assets, width, height, false);
 
         rasterize(frame, depth, width, height, &jobs, false);
     }
@@ -551,8 +590,10 @@ impl Scene {
     /// Нужно для тестов и замеров: обычный `draw` берёт глобальный пул, число
     /// потоков в котором задаёт rayon по числу ядер. Пул здесь строится на
     /// один вызов, так что для горячего пути это не годится
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_with_threads(
         &self,
+        assets: &Assets,
         frame: &mut [u8],
         depth: &mut [f32],
         width: u32,
@@ -560,14 +601,14 @@ impl Scene {
         threads: usize,
     ) {
         if threads <= 1 {
-            return self.draw_serial(frame, depth, width, height);
+            return self.draw_serial(assets, frame, depth, width, height);
         }
 
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
             .expect("не удалось собрать пул потоков")
-            .install(|| self.draw(frame, depth, width, height));
+            .install(|| self.draw(assets, frame, depth, width, height));
     }
 
     /// Вершинный этап целиком: из инстансов получается плоский список
@@ -578,7 +619,13 @@ impl Scene {
     /// не знает ничего про инстансы — ей нужен готовый список. Порядок списка
     /// повторяет прежний порядок отрисовки, и это важно: тест глубины и
     /// затирание проволочных линий зависят от порядка
-    fn build_raster_jobs(&self, width: u32, height: u32, parallel: bool) -> Vec<RasterJob<'_>> {
+    fn build_raster_jobs<'a>(
+        &self,
+        assets: &'a Assets,
+        width: u32,
+        height: u32,
+        parallel: bool,
+    ) -> Vec<RasterJob<'a>> {
         // Рассчитываем текущие векторы направления камеры
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();
@@ -612,7 +659,7 @@ impl Scene {
         // порядка: как бы инстансы ни разошлись по потокам, склейка идёт по
         // индексу, а не по тому, кто раньше закончил. Порядок важен, потому
         // что от него зависят тест глубины и затирание проволочных линий
-        let mut per_instance: Vec<Vec<RasterJob<'_>>> =
+        let mut per_instance: Vec<Vec<RasterJob<'a>>> =
             (0..self.instances.len()).map(|_| Vec::new()).collect();
 
         if parallel {
@@ -627,17 +674,17 @@ impl Scene {
                 .par_iter()
                 .zip(per_instance.par_iter_mut())
                 .for_each_init(VertexScratch::default, |scratch, (instance, out)| {
-                    self.shade_instance(instance, &vp_matrix, light_dir, scratch, out);
+                    shade_instance(assets, instance, &vp_matrix, light_dir, scratch, out);
                 });
         } else {
             let mut scratch = VertexScratch::default();
 
             for (instance, out) in self.instances.iter().zip(per_instance.iter_mut()) {
-                self.shade_instance(instance, &vp_matrix, light_dir, &mut scratch, out);
+                shade_instance(assets, instance, &vp_matrix, light_dir, &mut scratch, out);
             }
         }
 
-        let mut jobs: Vec<RasterJob<'_>> =
+        let mut jobs: Vec<RasterJob<'a>> =
             Vec::with_capacity(per_instance.iter().map(Vec::len).sum());
 
         for mut chunk in per_instance {
@@ -646,106 +693,107 @@ impl Scene {
 
         jobs
     }
+}
 
-    /// Вершинный этап одного инстанса: из меша получаются готовые треугольники.
-    ///
-    /// Вынесено в отдельный метод, чтобы одинаково вызываться и из
-    /// однопоточной ветки, и из потока
-    fn shade_instance<'scene>(
-        &'scene self,
-        instance: &Instance,
-        vp_matrix: &Mat4,
-        light_dir: Vec3,
-        scratch: &mut VertexScratch,
-        out: &mut Vec<RasterJob<'scene>>,
-    ) {
-        let mesh = self.mesh(instance.mesh);
+/// Вершинный этап одного инстанса: из меша получаются готовые треугольники.
+///
+/// Свободная функция, а не метод сцены: со сцены здесь не нужно ничего, кроме
+/// самого инстанса, — вся геометрия и текстуры лежат в аренах. Заодно это
+/// видно из сигнатуры, и одинаково вызывается из однопоточной ветки и из потока
+fn shade_instance<'a>(
+    assets: &'a Assets,
+    instance: &Instance,
+    vp_matrix: &Mat4,
+    light_dir: Vec3,
+    scratch: &mut VertexScratch,
+    out: &mut Vec<RasterJob<'a>>,
+) {
+    let mesh = assets.mesh(instance.mesh);
 
-        let model_matrix = instance.get_model_matrix();
-        let mvp_matrix = vp_matrix * &model_matrix;
+    let model_matrix = instance.get_model_matrix();
+    let mvp_matrix = vp_matrix * &model_matrix;
 
-        // Текстура — состояние на весь инстанс, как и на GPU: она
-        // «привязывается» один раз перед отрисовкой объекта. Здесь она всё же
-        // копируется в каждый треугольник: список плоский, инстанс из него
-        // уже не виден, а `Option<&Texture>` — это одно слово
-        let texture = instance.texture.map(|id| self.texture(id));
+    // Текстура — состояние на весь инстанс, как и на GPU: она
+    // «привязывается» один раз перед отрисовкой объекта. Здесь она всё же
+    // копируется в каждый треугольник: список плоский, инстанс из него
+    // уже не виден, а `Option<&Texture>` — это одно слово
+    let texture = instance.texture.map(|id| assets.texture(id));
 
-        // Вершинный этап: позиция уходит в clip space, а нормаль сразу
-        // превращается в яркость. Это и есть затенение по Гуро — свет
-        // считается в вершинах, дальше по грани его протянет интерполяция.
-        // Сама нормаль ниже уже не нужна, поэтому и не храним её
-        let VertexScratch {
-            clip_vertices,
-            intensities,
-        } = scratch;
+    // Вершинный этап: позиция уходит в clip space, а нормаль сразу
+    // превращается в яркость. Это и есть затенение по Гуро — свет
+    // считается в вершинах, дальше по грани его протянет интерполяция.
+    // Сама нормаль ниже уже не нужна, поэтому и не храним её
+    let VertexScratch {
+        clip_vertices,
+        intensities,
+    } = scratch;
 
-        clip_vertices.clear();
-        intensities.clear();
+    clip_vertices.clear();
+    intensities.clear();
 
-        for vertex in &mesh.vertices {
-            clip_vertices.push(&mvp_matrix * vertex.position);
+    for vertex in &mesh.vertices {
+        clip_vertices.push(&mvp_matrix * vertex.position);
 
-            let normal = model_matrix.transform_dir(vertex.normal).normalize();
-            let lambert = normal.dot(&light_dir).max(0.0);
+        let normal = model_matrix.transform_dir(vertex.normal).normalize();
+        let lambert = normal.dot(&light_dir).max(0.0);
 
-            intensities.push(AMBIENT_LIGHT + (1.0 - AMBIENT_LIGHT) * lambert);
-        }
+        intensities.push(AMBIENT_LIGHT + (1.0 - AMBIENT_LIGHT) * lambert);
+    }
 
-        // Отрисовываем грани этого меша с отсечением невидимых
-        {
-            for (i, triangle) in mesh.triangles.iter().enumerate() {
-                let v0 = clip_vertices[triangle[0]];
-                let v1 = clip_vertices[triangle[1]];
-                let v2 = clip_vertices[triangle[2]];
+    // Отрисовываем грани этого меша с отсечением невидимых
+    {
+        for (i, triangle) in mesh.triangles.iter().enumerate() {
+            let v0 = clip_vertices[triangle[0]];
+            let v1 = clip_vertices[triangle[1]];
+            let v2 = clip_vertices[triangle[2]];
 
-                if is_backface(v0, v1, v2) {
-                    continue; // грань отвернута - пропускаем
-                }
+            if is_backface(v0, v1, v2) {
+                continue; // грань отвернута - пропускаем
+            }
 
-                // цвет грани до освещения
-                // Если раскраски по граням нет (или она короче) — берём цвет объекта
-                let base_color = instance
-                    .face_colors
-                    .as_ref()
-                    .and_then(|fc| fc.get(i))
-                    .copied()
-                    .unwrap_or(instance.color);
+            // цвет грани до освещения
+            // Если раскраски по граням нет (или она короче) — берём цвет объекта
+            let base_color = instance
+                .face_colors
+                .as_ref()
+                .and_then(|fc| fc.get(i))
+                .copied()
+                .unwrap_or(instance.color);
 
-                // Если включен режим проволочных граней для инстанса.
-                // Проволока режется по ближней плоскости не здесь, а внутри
-                // самой отрисовки линии, поэтому в список едут исходные
-                // clip-позиции
-                if instance.wireframe {
-                    out.push(RasterJob::Wireframe {
-                        positions: [v0, v1, v2],
-                        color: base_color,
-                    });
-                    continue;
-                }
+            // Если включен режим проволочных граней для инстанса.
+            // Проволока режется по ближней плоскости не здесь, а внутри
+            // самой отрисовки линии, поэтому в список едут исходные
+            // clip-позиции
+            if instance.wireframe {
+                out.push(RasterJob::Wireframe {
+                    positions: [v0, v1, v2],
+                    color: base_color,
+                });
+                continue;
+            }
 
-                // Собираем вершины для растеризатора: у каждой свой цвет,
-                // потому что своя яркость. У меша из flat_shaded все три
-                // яркости совпадают и грань выходит однотонной, у гладкого —
-                // расходятся, и интерполяция даёт градиент
-                let base = unpack_color(base_color);
-                let shaded = |index: usize| {
-                    ShadedVertex::new(clip_vertices[index], base * intensities[index])
-                        .with_uv(mesh.vertices[index].uv)
-                };
+            // Собираем вершины для растеризатора: у каждой свой цвет,
+            // потому что своя яркость. У меша из flat_shaded все три
+            // яркости совпадают и грань выходит однотонной, у гладкого —
+            // расходятся, и интерполяция даёт градиент
+            let base = unpack_color(base_color);
+            let shaded = |index: usize| {
+                ShadedVertex::new(clip_vertices[index], base * intensities[index])
+                    .with_uv(mesh.vertices[index].uv)
+            };
 
-                // Режем по ближней плоскости; в список едут уже осколки
-                let (triangles, count) = clip_triangle_near([
-                    shaded(triangle[0]),
-                    shaded(triangle[1]),
-                    shaded(triangle[2]),
-                ]);
+            // Режем по ближней плоскости; в список едут уже осколки
+            let (triangles, count) = clip_triangle_near([
+                shaded(triangle[0]),
+                shaded(triangle[1]),
+                shaded(triangle[2]),
+            ]);
 
-                for triangle in &triangles[..count] {
-                    out.push(RasterJob::Filled {
-                        vertices: *triangle,
-                        texture,
-                    });
-                }
+            for triangle in &triangles[..count] {
+                out.push(RasterJob::Filled {
+                    vertices: *triangle,
+                    texture,
+                });
             }
         }
     }
