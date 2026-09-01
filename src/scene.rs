@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use rayon::prelude::*;
 
 use crate::{
     clipping::clip_triangle_near,
@@ -349,8 +349,27 @@ impl Mesh {
     }
 }
 
+/// Ссылка на меш, живущий в сцене.
+///
+/// Внутри обычный индекс, поэтому тип `Copy`: объявил меш один раз, дальше
+/// раздавай сколько угодно инстансам без всяких `clone`. Раньше на этом месте
+/// был `Rc<Mesh>`, и у него было ровно два минуса. Пользовательский: чтобы
+/// переиспользовать меш, приходилось писать `Rc::new` и `Rc::clone` руками.
+/// И технический, куда более неприятный: `Rc` не `Sync`, потому что счётчик
+/// ссылок у него неатомарный, а значит `&Instance` нельзя было отдать в
+/// другой поток — вершинный этап оставался однопоточным.
+///
+/// Плата за простоту: типом ничего не гарантируется. Индекс из чужой сцены
+/// скомпилируется и молча возьмёт не тот меш
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshId(usize);
+
+/// Ссылка на текстуру, живущую в сцене. Всё то же, что и у [`MeshId`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureId(usize);
+
 pub struct Instance {
-    pub mesh: Rc<Mesh>,
+    pub mesh: MeshId,
     pub position: Vec3,
     pub rotation: Vec3,
     pub scale: Vec3,
@@ -361,17 +380,17 @@ pub struct Instance {
     // индекс совпадает с mesh.triangles
     pub face_colors: Option<Vec<[u8; 4]>>,
 
-    /// Текстура объекта. За Rc по той же причине, что и меш: одну картинку
-    /// разделяют десятки инстансов, копировать её на каждый незачем
-    pub texture: Option<Rc<Texture>>,
+    /// Текстура объекта, тоже ссылкой в арену сцены: одну картинку разделяют
+    /// десятки инстансов, копировать её на каждый незачем
+    pub texture: Option<TextureId>,
 
     pub wireframe: bool,
 }
 
 impl Instance {
-    pub fn new(mesh: impl Into<Rc<Mesh>>, position: Vec3) -> Self {
+    pub fn new(mesh: MeshId, position: Vec3) -> Self {
         Self {
-            mesh: mesh.into(),
+            mesh,
             position,
             rotation: Vec3::new(0.0, 0.0, 0.0),
             scale: Vec3::new(1.0, 1.0, 1.0),
@@ -398,8 +417,8 @@ impl Instance {
     /// (255, 255, 255) отдаёт картинку как есть, любой другой её подкрашивает.
     /// Смысла в текстуре не будет, если у меша нет развёртки — тогда все UV
     /// нулевые и вся поверхность прочитает один и тот же левый верхний тексель
-    pub fn with_texture(mut self, texture: impl Into<Rc<Texture>>) -> Self {
-        self.texture = Some(texture.into());
+    pub fn with_texture(mut self, texture: TextureId) -> Self {
+        self.texture = Some(texture);
         self
     }
 
@@ -422,6 +441,12 @@ impl Instance {
 }
 
 pub struct Scene {
+    /// Арена мешей. Сцена ими владеет, инстансы держат только индексы —
+    /// поэтому в сцене нет ни одного разделяемого указателя, и её целиком
+    /// можно одолжить сразу нескольким потокам
+    meshes: Vec<Mesh>,
+    /// Арена текстур, по той же схеме
+    textures: Vec<Texture>,
     // массив инстансов
     pub instances: Vec<Instance>,
     // камера
@@ -434,6 +459,8 @@ impl Scene {
     // Создание сцены
     pub fn new() -> Self {
         Self {
+            meshes: Vec::new(),
+            textures: Vec::new(),
             instances: Vec::new(),
             camera_position: Vec3::new(0.0, 0.0, 5.0),
             yaw: -90.0,
@@ -441,27 +468,89 @@ impl Scene {
         }
     }
 
+    /// Отдать меш сцене и получить ссылку на него.
+    ///
+    /// Ссылку можно копировать сколько угодно: она `Copy`, и каждый инстанс
+    /// хранит у себя всего одно число
+    pub fn add_mesh(&mut self, mesh: Mesh) -> MeshId {
+        self.meshes.push(mesh);
+
+        MeshId(self.meshes.len() - 1)
+    }
+
+    /// То же для текстуры
+    pub fn add_texture(&mut self, texture: Texture) -> TextureId {
+        self.textures.push(texture);
+
+        TextureId(self.textures.len() - 1)
+    }
+
+    pub fn mesh(&self, id: MeshId) -> &Mesh {
+        &self.meshes[id.0]
+    }
+
+    /// Изменить меш на месте — например деформировать вершины.
+    ///
+    /// Правка достанется ВСЕМ инстансам с этим `MeshId`. Чтобы изменить
+    /// только один объект, зарегистрируй копию: `let id = scene.add_mesh(
+    /// scene.mesh(base).clone())`. Раньше это делал `Rc::make_mut`, который
+    /// клонировал молча — теперь копия видна в коде
+    pub fn mesh_mut(&mut self, id: MeshId) -> &mut Mesh {
+        &mut self.meshes[id.0]
+    }
+
+    pub fn texture(&self, id: TextureId) -> &Texture {
+        &self.textures[id.0]
+    }
+
     pub fn add_instance(&mut self, instance: Instance) {
         self.instances.push(instance);
     }
 
-    /// Отрисовать кадр, распараллелив растеризацию по числу ядер.
-    pub fn draw(&self, frame: &mut [u8], depth: &mut [f32], width: u32, height: u32) {
-        let threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+    /// Короткий путь для меша, который нужен ровно одному объекту: регистрирует
+    /// его и сразу заводит инстанс. Возвращает ссылку на инстанс, чтобы можно
+    /// было донастроить масштаб и поворот
+    pub fn spawn(&mut self, mesh: Mesh, position: Vec3) -> &mut Instance {
+        let id = self.add_mesh(mesh);
+        self.instances.push(Instance::new(id, position));
 
-        self.draw_with_threads(frame, depth, width, height, threads);
+        self.instances.last_mut().expect("только что добавили")
     }
 
-    /// То же самое, но с явным числом потоков.
+    /// Отрисовать кадр, распараллелив растеризацию по числу ядер.
+    /// Отрисовать кадр, разложив работу по глобальному пулу потоков rayon.
     ///
-    /// Нужно не только для замеров: на этом держится главная проверка всей
-    /// многопоточности — кадр, собранный в один поток, обязан ПОБАЙТОВО
-    /// совпасть с кадром, собранным в семь. Полосы не пересекаются, каждый
+    /// Пул создаётся один раз на процесс и живёт между кадрами. Это важнее,
+    /// чем кажется: раньше здесь был `thread::scope`, и потоки создавались
+    /// заново каждый кадр — на 12 потоках это стоило около 0.2 мс, то есть
+    /// больше, чем весь вершинный этап
+    pub fn draw(&self, frame: &mut [u8], depth: &mut [f32], width: u32, height: u32) {
+        // Геометрия считается один раз на кадр, а не в каждой полосе: полос
+        // десятки, и повторять вершинный этап для каждой было бы вернейшим
+        // способом сделать «многопоточность», которая медленнее исходника
+        let jobs = self.build_raster_jobs(width, height, true);
+
+        rasterize(frame, depth, width, height, &jobs, true);
+    }
+
+    /// Отрисовать кадр строго в один поток, вообще не трогая пул.
+    ///
+    /// Это опорная точка для сравнения: кадр, собранный так, обязан
+    /// ПОБАЙТОВО совпасть с параллельным. Полосы не пересекаются, каждый
     /// пиксель пишет ровно один поток, и порядок треугольников внутри полосы
-    /// тот же, что и без потоков, — значит совпадение должно быть точным, а
-    /// не «на глаз». Расхождение тут означает гонку
+    /// тот же — значит совпадение должно быть точным, а не «на глаз».
+    /// Расхождение означает гонку
+    pub fn draw_serial(&self, frame: &mut [u8], depth: &mut [f32], width: u32, height: u32) {
+        let jobs = self.build_raster_jobs(width, height, false);
+
+        rasterize(frame, depth, width, height, &jobs, false);
+    }
+
+    /// Отрисовать кадр на пуле ровно из `threads` потоков.
+    ///
+    /// Нужно для тестов и замеров: обычный `draw` берёт глобальный пул, число
+    /// потоков в котором задаёт rayon по числу ядер. Пул здесь строится на
+    /// один вызов, так что для горячего пути это не годится
     pub fn draw_with_threads(
         &self,
         frame: &mut [u8],
@@ -470,12 +559,15 @@ impl Scene {
         height: u32,
         threads: usize,
     ) {
-        // Геометрия считается один раз на кадр, а не в каждом потоке: полос
-        // много, и повторять вершинный этап для каждой было бы вернейшим
-        // способом сделать «многопоточность», которая медленнее исходника
-        let jobs = self.build_raster_jobs(width, height);
+        if threads <= 1 {
+            return self.draw_serial(frame, depth, width, height);
+        }
 
-        rasterize(frame, depth, width, height, &jobs, threads.max(1));
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("не удалось собрать пул потоков")
+            .install(|| self.draw(frame, depth, width, height));
     }
 
     /// Вершинный этап целиком: из инстансов получается плоский список
@@ -486,7 +578,7 @@ impl Scene {
     /// не знает ничего про инстансы — ей нужен готовый список. Порядок списка
     /// повторяет прежний порядок отрисовки, и это важно: тест глубины и
     /// затирание проволочных линий зависят от порядка
-    fn build_raster_jobs(&self, width: u32, height: u32) -> Vec<RasterJob<'_>> {
+    fn build_raster_jobs(&self, width: u32, height: u32, parallel: bool) -> Vec<RasterJob<'_>> {
         // Рассчитываем текущие векторы направления камеры
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();
@@ -512,45 +604,96 @@ impl Scene {
         // Объединяем View * Projection один раз для кадра
         let vp_matrix = &projection_matrix * &view_matrix;
 
-        let mut jobs: Vec<RasterJob<'_>> = Vec::new();
-
         // Направление на источник света — одно на всю сцену, считаем до циклов
         let light_dir = LIGHT_DIRECTION.normalize();
 
-        // Буферы обработанных вершин переиспользуются между инстансами:
-        // ёмкость выделяется один раз, а не на каждый объект каждый кадр
-        let mut clip_vertices: Vec<Vec4> = Vec::new();
-        let mut intensities: Vec<f32> = Vec::new();
+        // У каждого инстанса свой выходной вектор, и складываются они потом
+        // строго по порядку инстансов. Это и есть весь секрет сохранения
+        // порядка: как бы инстансы ни разошлись по потокам, склейка идёт по
+        // индексу, а не по тому, кто раньше закончил. Порядок важен, потому
+        // что от него зависят тест глубины и затирание проволочных линий
+        let mut per_instance: Vec<Vec<RasterJob<'_>>> =
+            (0..self.instances.len()).map(|_| Vec::new()).collect();
 
-        // Рендеринг каждого инстанса сцены
-        for instance in &self.instances {
-            let model_matrix = instance.get_model_matrix();
-            let mvp_matrix = &vp_matrix * &model_matrix;
+        if parallel {
+            // Именно здесь окупился отказ от Rc: в сцене не осталось ни одного
+            // неатомарного счётчика ссылок, поэтому `&Scene` — Sync, и её можно
+            // просто одолжить всем потокам.
+            //
+            // for_each_init, а не for_each: черновики создаются ОДИН раз на
+            // рабочий поток и переиспользуются между его инстансами. Обычный
+            // for_each выделял бы их заново на каждый объект каждый кадр
+            self.instances
+                .par_iter()
+                .zip(per_instance.par_iter_mut())
+                .for_each_init(VertexScratch::default, |scratch, (instance, out)| {
+                    self.shade_instance(instance, &vp_matrix, light_dir, scratch, out);
+                });
+        } else {
+            let mut scratch = VertexScratch::default();
 
-            // Текстура — состояние на весь инстанс, как и на GPU: она
-            // «привязывается» один раз перед отрисовкой объекта. Здесь она
-            // всё же копируется в каждый треугольник: список плоский, инстанс
-            // из него уже не виден, а `Option<&Texture>` — это одно слово
-            let texture = instance.texture.as_deref();
-
-            // Вершинный этап: позиция уходит в clip space, а нормаль сразу
-            // превращается в яркость. Это и есть затенение по Гуро — свет
-            // считается в вершинах, дальше по грани его протянет интерполяция.
-            // Сама нормаль ниже уже не нужна, поэтому и не храним её
-            clip_vertices.clear();
-            intensities.clear();
-
-            for vertex in &instance.mesh.vertices {
-                clip_vertices.push(&mvp_matrix * vertex.position);
-
-                let normal = model_matrix.transform_dir(vertex.normal).normalize();
-                let lambert = normal.dot(&light_dir).max(0.0);
-
-                intensities.push(AMBIENT_LIGHT + (1.0 - AMBIENT_LIGHT) * lambert);
+            for (instance, out) in self.instances.iter().zip(per_instance.iter_mut()) {
+                self.shade_instance(instance, &vp_matrix, light_dir, &mut scratch, out);
             }
+        }
 
-            // Отрисовываем грани этого меша с отсечением невидимых
-            for (i, triangle) in instance.mesh.triangles.iter().enumerate() {
+        let mut jobs: Vec<RasterJob<'_>> =
+            Vec::with_capacity(per_instance.iter().map(Vec::len).sum());
+
+        for mut chunk in per_instance {
+            jobs.append(&mut chunk);
+        }
+
+        jobs
+    }
+
+    /// Вершинный этап одного инстанса: из меша получаются готовые треугольники.
+    ///
+    /// Вынесено в отдельный метод, чтобы одинаково вызываться и из
+    /// однопоточной ветки, и из потока
+    fn shade_instance<'scene>(
+        &'scene self,
+        instance: &Instance,
+        vp_matrix: &Mat4,
+        light_dir: Vec3,
+        scratch: &mut VertexScratch,
+        out: &mut Vec<RasterJob<'scene>>,
+    ) {
+        let mesh = self.mesh(instance.mesh);
+
+        let model_matrix = instance.get_model_matrix();
+        let mvp_matrix = vp_matrix * &model_matrix;
+
+        // Текстура — состояние на весь инстанс, как и на GPU: она
+        // «привязывается» один раз перед отрисовкой объекта. Здесь она всё же
+        // копируется в каждый треугольник: список плоский, инстанс из него
+        // уже не виден, а `Option<&Texture>` — это одно слово
+        let texture = instance.texture.map(|id| self.texture(id));
+
+        // Вершинный этап: позиция уходит в clip space, а нормаль сразу
+        // превращается в яркость. Это и есть затенение по Гуро — свет
+        // считается в вершинах, дальше по грани его протянет интерполяция.
+        // Сама нормаль ниже уже не нужна, поэтому и не храним её
+        let VertexScratch {
+            clip_vertices,
+            intensities,
+        } = scratch;
+
+        clip_vertices.clear();
+        intensities.clear();
+
+        for vertex in &mesh.vertices {
+            clip_vertices.push(&mvp_matrix * vertex.position);
+
+            let normal = model_matrix.transform_dir(vertex.normal).normalize();
+            let lambert = normal.dot(&light_dir).max(0.0);
+
+            intensities.push(AMBIENT_LIGHT + (1.0 - AMBIENT_LIGHT) * lambert);
+        }
+
+        // Отрисовываем грани этого меша с отсечением невидимых
+        {
+            for (i, triangle) in mesh.triangles.iter().enumerate() {
                 let v0 = clip_vertices[triangle[0]];
                 let v1 = clip_vertices[triangle[1]];
                 let v2 = clip_vertices[triangle[2]];
@@ -573,7 +716,7 @@ impl Scene {
                 // самой отрисовки линии, поэтому в список едут исходные
                 // clip-позиции
                 if instance.wireframe {
-                    jobs.push(RasterJob::Wireframe {
+                    out.push(RasterJob::Wireframe {
                         positions: [v0, v1, v2],
                         color: base_color,
                     });
@@ -587,7 +730,7 @@ impl Scene {
                 let base = unpack_color(base_color);
                 let shaded = |index: usize| {
                     ShadedVertex::new(clip_vertices[index], base * intensities[index])
-                        .with_uv(instance.mesh.vertices[index].uv)
+                        .with_uv(mesh.vertices[index].uv)
                 };
 
                 // Режем по ближней плоскости; в список едут уже осколки
@@ -598,16 +741,24 @@ impl Scene {
                 ]);
 
                 for triangle in &triangles[..count] {
-                    jobs.push(RasterJob::Filled {
+                    out.push(RasterJob::Filled {
                         vertices: *triangle,
                         texture,
                     });
                 }
             }
         }
-
-        jobs
     }
+}
+
+/// Переиспользуемые буферы вершинного этапа.
+///
+/// Один такой на поток, а не на инстанс: длина у них — число вершин меша, и
+/// без переиспользования каждый объект каждый кадр заново выделял бы память
+#[derive(Default)]
+struct VertexScratch {
+    clip_vertices: Vec<Vec4>,
+    intensities: Vec<f32>,
 }
 
 /// Один готовый к растеризации треугольник.
@@ -633,9 +784,16 @@ type Band<'a> = (u32, &'a mut [u8], &'a mut [f32]);
 
 /// Растеризовать список треугольников в кадр, разложив работу по потокам.
 ///
-/// Схема самая простая из работающих: кадр режется на горизонтальные полосы,
-/// полосы раздаются потокам по кругу, каждый поток проходит ВЕСЬ список
-/// треугольников и рисует только то, что попало в его полосы.
+/// Схема: кадр режется на горизонтальные полосы, полосы разбирает пул
+/// потоков, каждая полоса проходит ВЕСЬ список треугольников и рисует только
+/// то, что в неё попало.
+///
+/// Раздачей занимается work-stealing rayon, а не мы: поток, доевший свои
+/// полосы, забирает чужие. Раньше здесь была статическая раздача по кругу —
+/// она нужна была потому, что сплошной кусок экрана даёт неравномерную
+/// нагрузку (небо сверху пустое, пол снизу закрашен целиком). Кража работы
+/// решает ту же задачу лучше и без наших рук: перекос выравнивается по факту,
+/// а не по догадке о том, где на экране будет тяжело.
 ///
 /// Ключевое свойство — полосы не пересекаются. Значит два потока физически не
 /// могут писать в один пиксель, и никакой синхронизации, атомиков и мьютексов
@@ -653,7 +811,7 @@ fn rasterize(
     width: u32,
     height: u32,
     jobs: &[RasterJob<'_>],
-    threads: usize,
+    parallel: bool,
 ) {
     if width == 0 || height == 0 {
         return;
@@ -670,51 +828,39 @@ fn rasterize(
         })
         .collect();
 
-    // Один поток — обходимся без потоков вовсе. Не микрооптимизация:
-    // это ещё и путь, с которым сравнивается многопоточный результат
-    if threads <= 1 {
-        rasterize_bands(bands, jobs, width, height);
-        return;
-    }
-
-    // Раздача по кругу, а не сплошными кусками. Сплошной кусок экрана —
-    // это неравномерная нагрузка: небо сверху пустое, пол снизу закрашен
-    // целиком. Чередование даёт каждому потоку равномерную выборку по высоте
-    let mut buckets: Vec<Vec<Band<'_>>> = (0..threads).map(|_| Vec::new()).collect();
-
-    for (i, band) in bands.into_iter().enumerate() {
-        buckets[i % threads].push(band);
-    }
-
-    // Именно scope, а не thread::spawn: обычный spawn требует 'static, то есть
-    // буфер кадра пришлось бы куда-то переселять. Область гарантирует, что все
-    // потоки завершатся до её конца, и потому позволяет одалживать чужие данные
-    std::thread::scope(|scope| {
-        for bucket in buckets {
-            scope.spawn(move || rasterize_bands(bucket, jobs, width, height));
+    if parallel {
+        bands
+            .into_par_iter()
+            .for_each(|band| rasterize_band(band, jobs, width, height));
+    } else {
+        // Путь без единого потока: с ним сравнивается параллельный результат
+        for band in bands {
+            rasterize_band(band, jobs, width, height);
         }
-    });
+    }
 }
 
-/// Пройти список треугольников для каждой из выданных полос
-fn rasterize_bands(bands: Vec<Band<'_>>, jobs: &[RasterJob<'_>], width: u32, height: u32) {
-    for (y_offset, frame_band, depth_band) in bands {
-        let rows = depth_band.len() as u32 / width;
+/// Пройти весь список треугольников для одной полосы
+fn rasterize_band(band: Band<'_>, jobs: &[RasterJob<'_>], width: u32, height: u32) {
+    let (y_offset, frame_band, depth_band) = band;
 
-        let mut ctx = DrawContext::band(
-            frame_band, depth_band, width, height, y_offset, rows, LINE_COLOR,
-        );
+    // Высота берётся из длины среза, а не из RASTER_BAND_ROWS: последняя
+    // полоса короче, если высота кадра не делится нацело
+    let rows = depth_band.len() as u32 / width;
 
-        for job in jobs {
-            match job {
-                RasterJob::Filled { vertices, texture } => {
-                    ctx.texture = *texture;
-                    draw_triangle_filled(vertices[0], vertices[1], vertices[2], &mut ctx);
-                }
-                RasterJob::Wireframe { positions, color } => {
-                    ctx.color = *color;
-                    draw_triangle_wireframe(positions[0], positions[1], positions[2], &mut ctx);
-                }
+    let mut ctx = DrawContext::band(
+        frame_band, depth_band, width, height, y_offset, rows, LINE_COLOR,
+    );
+
+    for job in jobs {
+        match job {
+            RasterJob::Filled { vertices, texture } => {
+                ctx.texture = *texture;
+                draw_triangle_filled(vertices[0], vertices[1], vertices[2], &mut ctx);
+            }
+            RasterJob::Wireframe { positions, color } => {
+                ctx.color = *color;
+                draw_triangle_wireframe(positions[0], positions[1], positions[2], &mut ctx);
             }
         }
     }

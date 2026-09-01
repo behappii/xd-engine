@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use winit::{event_loop::EventLoop, keyboard::KeyCode};
 
 // Движок живёт в библиотечном крейте (src/lib.rs), а этот файл — обычный
@@ -19,13 +17,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Создаем Движок
     let mut app = EngineApp::new();
 
-    // Генерируем меши
-    let cube = Rc::new(Mesh::create_cube());
-    let pyramid = Rc::new(Mesh::create_pyramid());
+    // Меши регистрируются в сцене один раз и дальше раздаются инстансам по
+    // ссылке. MeshId — обычное число и Copy, поэтому ни клонировать, ни
+    // заворачивать во что-либо его не нужно
+    let cube = app.scene.add_mesh(Mesh::create_cube());
+    let pyramid = app.scene.add_mesh(Mesh::create_pyramid());
 
     // Создаем инстансы
-    let mut obj1 =
-        Instance::new(Rc::clone(&cube), Vec3::new(-3.0, 0.7, 0.0)).with_color([255, 255, 255, 255]);
+    let mut obj1 = Instance::new(cube, Vec3::new(-3.0, 0.7, 0.0)).with_color([255, 255, 255, 255]);
     obj1.scale = Vec3::new(0.6, 0.6, 0.6);
 
     let mut obj2 =
@@ -33,37 +32,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     obj2.scale = Vec3::new(0.6, 0.6, 0.6);
 
     // Легко добавляем третий объект (еще один куб повыше), просто написав одну строчку!
-    let mut obj3 = Instance::new(Rc::clone(&cube), Vec3::new(0.0, 0.5, 0.0))
+    let mut obj3 = Instance::new(cube, Vec3::new(0.0, 0.5, 0.0))
         .with_color([255, 255, 255, 255])
         .as_wireframe();
     obj3.scale = Vec3::new(0.6, 0.6, 0.6);
 
     // Куб с разноцветными гранями: по 2 треугольника на грань,
     // порядок как в create_cube — back, front, bottom, top, left, right
-    let mut obj4 =
-        Instance::new(Mesh::create_cube(), Vec3::new(0.0, 1.5, -1.0)).with_face_colors(vec![
-            [255, 80, 80, 255],
-            [255, 80, 80, 255], // back
-            [80, 255, 80, 255],
-            [80, 255, 80, 255], // front
-            [80, 80, 255, 255],
-            [80, 80, 255, 255], // bottom
-            [255, 255, 80, 255],
-            [255, 255, 80, 255], // top
-            [255, 80, 255, 255],
-            [255, 80, 255, 255], // left
-            [80, 255, 255, 255],
-            [80, 255, 255, 255], // right
-        ]);
+    let mut obj4 = Instance::new(
+        app.scene.add_mesh(Mesh::create_cube()),
+        Vec3::new(0.0, 1.5, -1.0),
+    )
+    .with_face_colors(vec![
+        [255, 80, 80, 255],
+        [255, 80, 80, 255], // back
+        [80, 255, 80, 255],
+        [80, 255, 80, 255], // front
+        [80, 80, 255, 255],
+        [80, 80, 255, 255], // bottom
+        [255, 255, 80, 255],
+        [255, 255, 80, 255], // top
+        [255, 80, 255, 255],
+        [255, 80, 255, 255], // left
+        [80, 255, 255, 255],
+        [80, 255, 255, 255], // right
+    ]);
     obj4.scale = Vec3::new(0.6, 0.6, 0.6);
 
     for i in 0..20 {
         let angle = i as f32 * 18.0_f32.to_radians();
-        let mut cube_ring = Instance::new(
-            Rc::clone(&cube),
-            Vec3::new(angle.cos() * 6.0, -2.0, angle.sin() * 6.0),
-        )
-        .with_color([200, 200, 60, 255]);
+        let mut cube_ring =
+            Instance::new(cube, Vec3::new(angle.cos() * 6.0, -2.0, angle.sin() * 6.0))
+                .with_color([200, 200, 60, 255]);
         cube_ring.scale = Vec3::new(0.3, 0.3, 0.3);
         app.scene.add_instance(cube_ring);
     }
@@ -78,35 +78,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // не должны рваться на меридиане 0° (шов сошёлся) и обязаны сбегаться
     // к полюсам клиньями. Ни того ни другого в проволочном режиме не разглядеть.
     // Клеток больше, чем у пола: на 24 долях пара клеток слилась бы в полосы
-    let mut obj5 = Instance::new(Mesh::create_sphere(16, 24), Vec3::new(1.8, 0.7, 0.0))
+    let globe = app.scene.add_texture(Texture::checker(
+        64,
+        8,
+        [230, 230, 230, 255],
+        [40, 40, 60, 255],
+    ));
+    let sphere_mesh = app.scene.add_mesh(Mesh::create_sphere(16, 24));
+
+    let mut obj5 = Instance::new(sphere_mesh, Vec3::new(1.8, 0.7, 0.0))
         .with_color([255, 255, 255, 255])
-        .with_texture(Texture::checker(
-            64,
-            8,
-            [230, 230, 230, 255],
-            [40, 40, 60, 255],
-        ));
+        .with_texture(globe);
     obj5.scale = Vec3::new(0.7, 0.7, 0.7);
 
     // Процедурная шахматка — не нужен ни файл, ни художник
-    let checker = Texture::checker(4, 2, [230, 230, 230, 255], [40, 40, 60, 255]);
+    let checker_image = Texture::checker(4, 2, [230, 230, 230, 255], [40, 40, 60, 255]);
 
     // Картинка из файла. Путь относительный — `cargo run` запускается из корня проекта.
     // Демо не должно падать из-за отсутствующей картинки: textures/ не в
     // репозитории, и у свежего клона там пусто. Но и молчать нельзя — иначе
     // на кубе окажется шахматка без единого намёка почему, и искать причину
     // будешь в развёртке или в выборке текселя. Отсюда предупреждение
-    let photo = Rc::new(Texture::load("textures/noname.png").unwrap_or_else(|err| {
+    let photo_image = Texture::load("textures/noname.png").unwrap_or_else(|err| {
         eprintln!("текстура не загрузилась ({err}), берём шахматку");
-        // Замыкание только одалживает checker — сама текстура уедет в пол ниже
-        checker.clone()
-    }));
+        // Замыкание только одалживает картинку — сама она уедет в пол ниже
+        checker_image.clone()
+    });
+
+    let photo = app.scene.add_texture(photo_image);
+    let checker = app.scene.add_texture(checker_image);
 
     // Куб с текстурой. Развёртка `create_cube` отдаёт каждой грани весь
     // квадрат картинки, так что она ложится на грань целиком.
     // Цвет белый не случайно: тексель на него умножается, и любой другой
     // цвет подкрасил бы фотографию
-    let mut obj6 = Instance::new(Rc::clone(&cube), Vec3::new(3.6, 0.7, 0.0))
+    let mut obj6 = Instance::new(cube, Vec3::new(3.6, 0.7, 0.0))
         .with_color([255, 255, 255, 255])
         .with_texture(photo);
     obj6.scale = Vec3::new(0.6, 0.6, 0.6);
@@ -120,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vertex.uv = vertex.uv * 12.0;
     }
 
-    let mut floor = Instance::new(floor_mesh, Vec3::new(0.0, -3.0, 0.0))
+    let mut floor = Instance::new(app.scene.add_mesh(floor_mesh), Vec3::new(0.0, -3.0, 0.0))
         .with_color([255, 255, 255, 255])
         .with_texture(checker);
     floor.scale = Vec3::new(20.0, 0.2, 20.0);
@@ -136,10 +142,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Пол крутиться не должен: анимация ниже вращает всё подряд
     let floor_index = app.scene.instances.len() - 1;
 
-    // Ручная деформация одного экземпляра меша.
-    // Rc::make_mut видит, что куб разделяют несколько инстансов, и молча
-    // клонирует его — правки достанутся только instances[0]
-    let mesh = Rc::make_mut(&mut app.scene.instances[0].mesh);
+    // Ручная деформация ОДНОГО объекта. Куб общий, поэтому сначала кладём в
+    // сцену его копию и переводим инстанс на неё, иначе правка разъехалась бы
+    // по всем кубам разом. Раньше то же самое делал Rc::make_mut, только
+    // молча — теперь копия видна в коде
+    let deformed = app.scene.mesh(cube).clone();
+    let deformed = app.scene.add_mesh(deformed);
+    app.scene.instances[0].mesh = deformed;
+
+    let mesh = app.scene.mesh_mut(deformed);
     mesh.vertices[0].position.y -= 1.0;
     mesh.vertices[1].position.x += 2.0;
     mesh.vertices[5].position.z += 4.0;
