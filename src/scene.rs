@@ -2,7 +2,10 @@ use std::rc::Rc;
 
 use crate::{
     clipping::clip_triangle_near,
-    config::{AMBIENT_LIGHT, DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, LIGHT_DIRECTION, LINE_COLOR},
+    config::{
+        AMBIENT_LIGHT, DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR, LIGHT_DIRECTION, LINE_COLOR,
+        RASTER_BAND_ROWS,
+    },
     math::{Mat4, Vec2, Vec3, Vec4},
     renderer::{
         DrawContext, ShadedVertex, draw_triangle_filled, draw_triangle_wireframe, is_backface,
@@ -442,7 +445,48 @@ impl Scene {
         self.instances.push(instance);
     }
 
+    /// Отрисовать кадр, распараллелив растеризацию по числу ядер.
     pub fn draw(&self, frame: &mut [u8], depth: &mut [f32], width: u32, height: u32) {
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        self.draw_with_threads(frame, depth, width, height, threads);
+    }
+
+    /// То же самое, но с явным числом потоков.
+    ///
+    /// Нужно не только для замеров: на этом держится главная проверка всей
+    /// многопоточности — кадр, собранный в один поток, обязан ПОБАЙТОВО
+    /// совпасть с кадром, собранным в семь. Полосы не пересекаются, каждый
+    /// пиксель пишет ровно один поток, и порядок треугольников внутри полосы
+    /// тот же, что и без потоков, — значит совпадение должно быть точным, а
+    /// не «на глаз». Расхождение тут означает гонку
+    pub fn draw_with_threads(
+        &self,
+        frame: &mut [u8],
+        depth: &mut [f32],
+        width: u32,
+        height: u32,
+        threads: usize,
+    ) {
+        // Геометрия считается один раз на кадр, а не в каждом потоке: полос
+        // много, и повторять вершинный этап для каждой было бы вернейшим
+        // способом сделать «многопоточность», которая медленнее исходника
+        let jobs = self.build_raster_jobs(width, height);
+
+        rasterize(frame, depth, width, height, &jobs, threads.max(1));
+    }
+
+    /// Вершинный этап целиком: из инстансов получается плоский список
+    /// треугольников, готовых к растеризации.
+    ///
+    /// Раньше этот код рисовал сразу, по ходу обхода инстансов. Разделение
+    /// нужно потому, что растеризация теперь идёт по полосам экрана, а полоса
+    /// не знает ничего про инстансы — ей нужен готовый список. Порядок списка
+    /// повторяет прежний порядок отрисовки, и это важно: тест глубины и
+    /// затирание проволочных линий зависят от порядка
+    fn build_raster_jobs(&self, width: u32, height: u32) -> Vec<RasterJob<'_>> {
         // Рассчитываем текущие векторы направления камеры
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();
@@ -468,7 +512,7 @@ impl Scene {
         // Объединяем View * Projection один раз для кадра
         let vp_matrix = &projection_matrix * &view_matrix;
 
-        let mut ctx = DrawContext::new(frame, depth, width, height, LINE_COLOR);
+        let mut jobs: Vec<RasterJob<'_>> = Vec::new();
 
         // Направление на источник света — одно на всю сцену, считаем до циклов
         let light_dir = LIGHT_DIRECTION.normalize();
@@ -484,9 +528,10 @@ impl Scene {
             let mvp_matrix = &vp_matrix * &model_matrix;
 
             // Текстура — состояние на весь инстанс, как и на GPU: она
-            // «привязывается» один раз перед отрисовкой объекта, а не
-            // передаётся в каждый треугольник
-            ctx.texture = instance.texture.as_deref();
+            // «привязывается» один раз перед отрисовкой объекта. Здесь она
+            // всё же копируется в каждый треугольник: список плоский, инстанс
+            // из него уже не виден, а `Option<&Texture>` — это одно слово
+            let texture = instance.texture.as_deref();
 
             // Вершинный этап: позиция уходит в clip space, а нормаль сразу
             // превращается в яркость. Это и есть затенение по Гуро — свет
@@ -523,10 +568,15 @@ impl Scene {
                     .copied()
                     .unwrap_or(instance.color);
 
-                // Если включен режим проволочных граней для инстанса
+                // Если включен режим проволочных граней для инстанса.
+                // Проволока режется по ближней плоскости не здесь, а внутри
+                // самой отрисовки линии, поэтому в список едут исходные
+                // clip-позиции
                 if instance.wireframe {
-                    ctx.color = base_color;
-                    draw_triangle_wireframe(v0, v1, v2, &mut ctx);
+                    jobs.push(RasterJob::Wireframe {
+                        positions: [v0, v1, v2],
+                        color: base_color,
+                    });
                     continue;
                 }
 
@@ -540,7 +590,7 @@ impl Scene {
                         .with_uv(instance.mesh.vertices[index].uv)
                 };
 
-                // Режем по ближней плоскости и растеризуем осколки
+                // Режем по ближней плоскости; в список едут уже осколки
                 let (triangles, count) = clip_triangle_near([
                     shaded(triangle[0]),
                     shaded(triangle[1]),
@@ -548,7 +598,122 @@ impl Scene {
                 ]);
 
                 for triangle in &triangles[..count] {
-                    draw_triangle_filled(triangle[0], triangle[1], triangle[2], &mut ctx);
+                    jobs.push(RasterJob::Filled {
+                        vertices: *triangle,
+                        texture,
+                    });
+                }
+            }
+        }
+
+        jobs
+    }
+}
+
+/// Один готовый к растеризации треугольник.
+///
+/// Плоский список таких работ — это граница между вершинным этапом и
+/// растеризацией. Всё, что нужно знать про инстанс, здесь уже скопировано:
+/// потоку-растеризатору сцена не видна вообще
+enum RasterJob<'tex> {
+    Filled {
+        vertices: [ShadedVertex; 3],
+        texture: Option<&'tex Texture>,
+    },
+    /// У проволоки нет ни атрибутов, ни теста глубины — только позиции и цвет
+    Wireframe {
+        positions: [Vec4; 3],
+        color: [u8; 4],
+    },
+}
+
+/// Полоса кадра, отданная одному потоку: номер первой строки и куски обоих
+/// буферов, относящиеся только к ней
+type Band<'a> = (u32, &'a mut [u8], &'a mut [f32]);
+
+/// Растеризовать список треугольников в кадр, разложив работу по потокам.
+///
+/// Схема самая простая из работающих: кадр режется на горизонтальные полосы,
+/// полосы раздаются потокам по кругу, каждый поток проходит ВЕСЬ список
+/// треугольников и рисует только то, что попало в его полосы.
+///
+/// Ключевое свойство — полосы не пересекаются. Значит два потока физически не
+/// могут писать в один пиксель, и никакой синхронизации, атомиков и мьютексов
+/// не нужно: `chunks_mut` выдаёт непересекающиеся `&mut`-срезы, и это
+/// доказывает компилятор, а не комментарий.
+///
+/// Цена схемы — треугольник обходят все потоки, даже те, чьи полосы он не
+/// задевает. Отсечение по Y стоит несколько сравнений, так что для крупных
+/// граней это ничто, а вот на сцене из множества мелких треугольников
+/// начнёт мешать: лечится разбиением экрана на плитки с предварительной
+/// раскладкой треугольников по ним, но это заметно сложнее
+fn rasterize(
+    frame: &mut [u8],
+    depth: &mut [f32],
+    width: u32,
+    height: u32,
+    jobs: &[RasterJob<'_>],
+    threads: usize,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let band_pixels = RASTER_BAND_ROWS * width as usize;
+
+    let bands: Vec<Band<'_>> = frame
+        .chunks_mut(band_pixels * 4)
+        .zip(depth.chunks_mut(band_pixels))
+        .enumerate()
+        .map(|(i, (frame_band, depth_band))| {
+            ((i * RASTER_BAND_ROWS) as u32, frame_band, depth_band)
+        })
+        .collect();
+
+    // Один поток — обходимся без потоков вовсе. Не микрооптимизация:
+    // это ещё и путь, с которым сравнивается многопоточный результат
+    if threads <= 1 {
+        rasterize_bands(bands, jobs, width, height);
+        return;
+    }
+
+    // Раздача по кругу, а не сплошными кусками. Сплошной кусок экрана —
+    // это неравномерная нагрузка: небо сверху пустое, пол снизу закрашен
+    // целиком. Чередование даёт каждому потоку равномерную выборку по высоте
+    let mut buckets: Vec<Vec<Band<'_>>> = (0..threads).map(|_| Vec::new()).collect();
+
+    for (i, band) in bands.into_iter().enumerate() {
+        buckets[i % threads].push(band);
+    }
+
+    // Именно scope, а не thread::spawn: обычный spawn требует 'static, то есть
+    // буфер кадра пришлось бы куда-то переселять. Область гарантирует, что все
+    // потоки завершатся до её конца, и потому позволяет одалживать чужие данные
+    std::thread::scope(|scope| {
+        for bucket in buckets {
+            scope.spawn(move || rasterize_bands(bucket, jobs, width, height));
+        }
+    });
+}
+
+/// Пройти список треугольников для каждой из выданных полос
+fn rasterize_bands(bands: Vec<Band<'_>>, jobs: &[RasterJob<'_>], width: u32, height: u32) {
+    for (y_offset, frame_band, depth_band) in bands {
+        let rows = depth_band.len() as u32 / width;
+
+        let mut ctx = DrawContext::band(
+            frame_band, depth_band, width, height, y_offset, rows, LINE_COLOR,
+        );
+
+        for job in jobs {
+            match job {
+                RasterJob::Filled { vertices, texture } => {
+                    ctx.texture = *texture;
+                    draw_triangle_filled(vertices[0], vertices[1], vertices[2], &mut ctx);
+                }
+                RasterJob::Wireframe { positions, color } => {
+                    ctx.color = *color;
+                    draw_triangle_wireframe(positions[0], positions[1], positions[2], &mut ctx);
                 }
             }
         }

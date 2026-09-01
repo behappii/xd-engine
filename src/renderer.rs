@@ -46,11 +46,31 @@ impl ShadedVertex {
 /// живёт ровно столько, сколько одолжена сцена, — а это заведомо меньше, чем
 /// живёт буфер кадра, пришедший снаружи. Слепив оба в одно время жизни, мы бы
 /// потребовали от текстуры невозможного
+/// Состояние отрисовки: куда пишем и чем.
+///
+/// `frame` и `depth` — это НЕ обязательно весь кадр, а горизонтальная полоса
+/// из него: при многопоточной растеризации каждый поток получает свой
+/// непересекающийся кусок обоих буферов. Отсюда разделение полей:
+///
+/// - `height` — высота всего кадра. От неё зависит перевод NDC в пиксели,
+///   и она обязана остаться прежней, иначе полоса нарисует своё содержимое
+///   в масштабе полосы, а не кадра;
+/// - `y_offset` и `rows` — где эта полоса лежит и какая она высокая. По ним
+///   растеризатор обрезает треугольник по Y и переводит номер строки кадра
+///   в номер строки внутри полосы.
+///
+/// У однопоточного пути `y_offset = 0`, `rows = height` — то есть «полоса»
+/// совпадает со всем кадром, и никакой особой ветки для него не нужно
 pub struct DrawContext<'frame, 'tex> {
     pub frame: &'frame mut [u8],
     pub depth: &'frame mut [f32],
     pub width: u32,
+    /// Высота ВСЕГО кадра, а не полосы
     pub height: u32,
+    /// Номер первой строки полосы в кадре
+    pub y_offset: u32,
+    /// Сколько строк в полосе
+    pub rows: u32,
     /// Цвет проволочных линий: у них атрибутов нет, цвет задаётся снаружи
     pub color: [u8; 4],
     /// Текстура текущего инстанса. Как и `color` — состояние, которое сцена
@@ -59,6 +79,7 @@ pub struct DrawContext<'frame, 'tex> {
 }
 
 impl<'frame, 'tex> DrawContext<'frame, 'tex> {
+    /// Контекст на весь кадр целиком
     pub fn new(
         frame: &'frame mut [u8],
         depth: &'frame mut [f32],
@@ -66,11 +87,30 @@ impl<'frame, 'tex> DrawContext<'frame, 'tex> {
         height: u32,
         color: [u8; 4],
     ) -> Self {
+        Self::band(frame, depth, width, height, 0, height, color)
+    }
+
+    /// Контекст на одну горизонтальную полосу кадра.
+    ///
+    /// `frame` и `depth` должны быть срезами ровно этой полосы, а `height` —
+    /// по-прежнему высотой всего кадра
+    #[allow(clippy::too_many_arguments)]
+    pub fn band(
+        frame: &'frame mut [u8],
+        depth: &'frame mut [f32],
+        width: u32,
+        height: u32,
+        y_offset: u32,
+        rows: u32,
+        color: [u8; 4],
+    ) -> Self {
         Self {
             frame,
             depth,
             width,
             height,
+            y_offset,
+            rows,
             color,
             texture: None,
         }
@@ -80,22 +120,31 @@ impl<'frame, 'tex> DrawContext<'frame, 'tex> {
     /// Запись без теста глубины (для проволочных линий)
     #[inline]
     pub fn set_pixel(&mut self, x: i32, y: i32) {
-        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+        // Границы теперь по полосе, а не по кадру: линия, пересекающая
+        // несколько полос, рисуется по кускам — каждый в своём потоке
+        if x < 0 || x >= self.width as i32 {
+            return;
+        }
+        if y < self.y_offset as i32 || y >= (self.y_offset + self.rows) as i32 {
             return;
         }
 
-        let index = (y as usize * self.width as usize + x as usize) * 4;
+        let row = y as usize - self.y_offset as usize;
+        let index = (row * self.width as usize + x as usize) * 4;
         self.frame[index..index + 4].copy_from_slice(&self.color);
     }
 
     /// Запись с тестом глубины. `inv_w` — величина 1/w: чем больше, тем ближе.
     /// Координаты уже проверены растеризатором, границы не трогаем.
     ///
+    /// `y` — номер строки в КАДРЕ, не в полосе: растеризатор мыслит экраном
+    /// и о нарезке не знает. Пересчёт в строку полосы — здесь.
+    ///
     /// Цвет приходит параметром, а не из `self`: у залитого треугольника он
     /// свой в каждом пикселе — это и есть результат интерполяции.
     #[inline]
     pub fn set_pixel_depth(&mut self, x: usize, y: usize, inv_w: f32, color: Vec3) {
-        let i = y * self.width as usize + x;
+        let i = (y - self.y_offset as usize) * self.width as usize + x;
 
         if inv_w <= self.depth[i] {
             return;
@@ -224,6 +273,19 @@ pub fn draw_triangle_filled(
         return;
     }
     let (max_x, max_y) = (max_x as usize, max_y as usize);
+
+    // Обрезка по полосе. При однопоточной отрисовке полоса — это весь кадр и
+    // строки ниже ничего не меняют; при многопоточной каждый поток так
+    // отбрасывает ту часть треугольника, которая лежит в чужой полосе.
+    // Треугольник обходят ВСЕ потоки, но пиксели каждого пишет ровно один —
+    // поэтому синхронизация не нужна вообще, а картинка получается той же
+    // и в том же порядке, что и без потоков
+    let min_y = min_y.max(ctx.y_offset as usize);
+    let max_y = max_y.min((ctx.y_offset + ctx.rows) as usize - 1);
+
+    if min_y > max_y {
+        return;
+    }
 
     for y in min_y..=max_y {
         for x in min_x..=max_x {
