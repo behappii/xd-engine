@@ -230,59 +230,97 @@ impl Mesh {
 
     /// UV-сфера радиуса 1: `stacks` колец по широте, `slices` долей по долготе.
     ///
-    /// Полюса — по одной вершине, а кольца замкнуты по долготе, то есть шва из
-    /// дублирующихся вершин нет. Это принципиально для `smooth_shaded`: если бы
-    /// вершины на стыке дублировались, каждая копия усредняла бы нормаль лишь
-    /// по половине соседей, и на сфере проступил бы шов
+    /// Строится как обычная прямоугольная сетка `(stacks + 1) × (slices + 1)`
+    /// вершин — та самая, в которой рисуют карты мира. Оба «+1» здесь не
+    /// описка, а ровно то, что отличает сферу С развёрткой от сферы без неё:
+    ///
+    /// - **Лишний столбец по долготе** — это шов. Меридиан 0° и меридиан 360° —
+    ///   одна и та же точка пространства, но на картинке это левый и правый
+    ///   края, `u = 0` и `u = 1`. Одной вершиной два значения не выразить,
+    ///   поэтому шовный столбец дублируется. Раньше сфера, наоборот,
+    ///   замыкала кольцо остатком от деления и вершин не дублировала.
+    /// - **Лишняя строка по широте** — полюса. У полюса вся строка сетки
+    ///   схлопывается в одну точку, но каждой доле нужна своя вершина, потому
+    ///   что `u` у них разное.
+    ///
+    /// Раньше дублировать вершины было нельзя: нормали считал `smooth_shaded`
+    /// усреднением по сходящимся граням, и у копии на шве соседей оказывалась
+    /// половина — по сфере пошла бы видимая полоса. Здесь нормали берутся не
+    /// усреднением, а точно: у сферы единичного радиуса нормаль в точке равна
+    /// самой позиции. Копии получают одинаковую нормаль по построению, и шов
+    /// исчезает из затенения сам собой
     pub fn create_sphere(stacks: usize, slices: usize) -> Self {
         let stacks = stacks.max(2);
         let slices = slices.max(3);
 
-        let mut positions = Vec::with_capacity(2 + (stacks - 1) * slices);
+        let mut vertices = Vec::with_capacity((stacks + 1) * (slices + 1));
 
-        positions.push(Vec3::new(0.0, 1.0, 0.0));
-
-        for stack in 1..stacks {
+        for stack in 0..=stacks {
+            // phi отсчитывается от северного полюса: 0 наверху, PI внизу
             let phi = std::f32::consts::PI * stack as f32 / stacks as f32;
             let (y, radius) = (phi.cos(), phi.sin());
 
-            for slice in 0..slices {
+            // v растёт вниз, как строки картинки, поэтому северный полюс —
+            // верхний край текстуры. Так же лежат и обычные карты мира
+            let v = stack as f32 / stacks as f32;
+            let at_pole = stack == 0 || stack == stacks;
+
+            for slice in 0..=slices {
                 let theta = std::f32::consts::TAU * slice as f32 / slices as f32;
 
-                positions.push(Vec3::new(radius * theta.cos(), y, radius * theta.sin()));
+                let position = Vec3::new(radius * theta.cos(), y, radius * theta.sin());
+
+                // У полюса четырёхугольник вырождается в треугольник, и его
+                // вершине достаётся не край доли, а её середина: иначе
+                // текстурный треугольник выходит прямоугольным вместо
+                // равнобедренного и картинка у полюсов заметно косит
+                let u = if at_pole {
+                    (slice as f32 + 0.5) / slices as f32
+                } else {
+                    slice as f32 / slices as f32
+                };
+
+                // Позиция на единичной сфере уже единичной длины, и она же —
+                // точная нормаль. Усреднять по граням незачем: усреднение лишь
+                // приближает то, что здесь известно из формулы
+                vertices.push(Vertex::new(position, position).with_uv(Vec2::new(u, v)));
             }
         }
 
-        positions.push(Vec3::new(0.0, -1.0, 0.0));
+        // Сетка хранится строками, поэтому шаг по широте — вся длина строки
+        let index = |stack: usize, slice: usize| stack * (slices + 1) + slice;
 
-        let north = 0;
-        let south = positions.len() - 1;
+        let mut triangles = Vec::with_capacity(stacks * slices * 2);
 
-        // Замыкание по долготе остатком от деления — 359° соседствует с 0°
-        let ring = |stack: usize, slice: usize| 1 + (stack - 1) * slices + slice % slices;
-
-        let mut triangles = Vec::new();
-
-        // Треугольные шапки у полюсов
-        for slice in 0..slices {
-            triangles.push([north, ring(1, slice + 1), ring(1, slice)]);
-            triangles.push([south, ring(stacks - 1, slice), ring(stacks - 1, slice + 1)]);
-        }
-
-        // Четырёхугольные пояса между кольцами, каждый из двух треугольников
-        for stack in 1..stacks - 1 {
+        for stack in 0..stacks {
             for slice in 0..slices {
-                let a = ring(stack, slice);
-                let b = ring(stack, slice + 1);
-                let c = ring(stack + 1, slice);
-                let d = ring(stack + 1, slice + 1);
+                let a = index(stack, slice);
+                let b = index(stack, slice + 1);
+                let c = index(stack + 1, slice);
+                let d = index(stack + 1, slice + 1);
 
-                triangles.push([a, b, c]);
-                triangles.push([b, d, c]);
+                if stack == 0 {
+                    // Северная шапка: a и b — обе полюс, треугольник [a, b, c]
+                    // выродился бы в отрезок нулевой площади. Остаётся один
+                    // треугольник, и его вершина берётся из столбца slice —
+                    // именно там лежит середина доли, посчитанная выше
+                    triangles.push([a, d, c]);
+                } else {
+                    triangles.push([a, b, c]);
+
+                    // Южная шапка симметрична: там вырождается [b, d, c],
+                    // потому что полюс уже c и d
+                    if stack + 1 != stacks {
+                        triangles.push([b, d, c]);
+                    }
+                }
             }
         }
 
-        Self::smooth_shaded(&positions, &triangles)
+        Self {
+            vertices,
+            triangles,
+        }
     }
 
     pub fn create_pyramid() -> Self {
