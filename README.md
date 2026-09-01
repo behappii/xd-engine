@@ -20,11 +20,13 @@ Vulkan, ни `glam` — вся математика, отсечение и ра�
 ```bash
 git clone <url>
 cd xd-engine
-cargo run --release
+cargo run --release --example demo
 ```
 
 `--release` здесь не формальность: без оптимизаций софтверный растеризатор
-медленнее раз в десять.
+медленнее раз в десять. А `--example` — потому что крейт чисто библиотечный:
+демо-сцена лежит в `examples/demo.rs` и подключает движок через тот же
+публичный API, что и любой сторонний проект.
 
 Демо-сцена ищет `textures/noname.png`. Каталог в репозитории пуст (картинки
 не хранятся в git), поэтому без своего файла куб покажется с процедурной
@@ -110,11 +112,15 @@ Mesh (Vertex: позиция + нормаль + UV, локальные коор�
 | `fps_counter` | счётчик кадров |
 
 `src/lib.rs` — библиотечный крейт `xd_engine`, где живёт весь движок.
-`src/main.rs` — обычный внешний потребитель: собирает демо-сцену и запускает
-цикл. Разделение сделано ради тестов: `Scene::draw` пишет в обычные срезы и
-окна не требует, поэтому кадр рендерится прямо в тесте.
+Исполняемой цели у крейта нет: демо-сцена — это `examples/demo.rs`, обычный
+внешний потребитель. `Scene::draw` пишет в обычные срезы и окна не требует,
+поэтому кадр рендерится прямо в тесте.
 
 ## Своя сцена
+
+Этот код целиком лежит в `examples/minimal.rs` и запускается как
+`cargo run --release --example minimal`. Он собирается при каждом
+`cargo build --examples`, так что разойтись с настоящим API молча не сможет.
 
 ```rust
 use winit::event_loop::EventLoop;
@@ -132,23 +138,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Меш и текстура отдаются сцене один раз. Обратно приходят хендлы —
     // обычные числа, Copy: раздавай их скольким угодно объектам
     let cube = app.scene.add_mesh(Mesh::create_cube());
-    let wood = app.scene.add_texture(Texture::load("textures/wood.png")?);
+    let checker = app.scene.add_texture(Texture::checker(
+        64,
+        8,
+        [230, 230, 230, 255],
+        [40, 40, 60, 255],
+    ));
 
-    let mut wooden_box = Instance::new(cube, Vec3::new(0.0, 0.0, -3.0))
+    // Цвет белый не случайно: тексель на него умножается, и любой другой
+    // цвет сработал бы как светофильтр поверх картинки
+    let mut textured = Instance::new(cube, Vec3::new(-1.2, 0.0, 0.0))
         .with_color([255, 255, 255, 255])
-        .with_texture(wood);
-    wooden_box.scale = Vec3::new(0.6, 0.6, 0.6);
-
-    app.scene.add_instance(wooden_box);
+        .with_texture(checker);
+    textured.scale = Vec3::new(0.6, 0.6, 0.6);
+    app.scene.add_instance(textured);
 
     // Второй объект тем же мешем — просто ещё раз тот же cube
-    app.scene.add_instance(Instance::new(cube, Vec3::new(2.0, 0.0, -3.0)));
+    let mut plain = Instance::new(cube, Vec3::new(1.2, 0.0, 0.0)).with_color([120, 190, 255, 255]);
+    plain.scale = Vec3::new(0.6, 0.6, 0.6);
+    app.scene.add_instance(plain);
 
     // Замыкание вызывается раз в кадр: сцена, зажатые клавиши, дельта времени
     let mut angle = 0.0f32;
     app.set_update(move |scene, _pressed_keys, dt| {
         angle += 45.0 * dt;
-        scene.instances[0].rotation.y = angle;
+
+        for instance in &mut scene.instances {
+            instance.rotation.y = angle;
+        }
     });
 
     event_loop.run_app(&mut app)?;
