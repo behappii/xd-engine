@@ -1,212 +1,11 @@
-use crate::{
-    clipping::clip_line_4d,
-    config::EPSILON,
-    math::{Vec2, Vec3, Vec4},
-    texture::Texture,
-};
+use crate::{config::EPSILON, math::Vec4};
 
-/// Вершина на входе растеризатора: позиция в clip space плюс всё, что нужно
-/// протянуть по треугольнику с интерполяцией.
-///
-/// Отдельный тип от `scene::Vertex`: там сырые атрибуты меша в локальных
-/// координатах, здесь — уже обработанные, готовые к растеризации. Пара
-/// «вершинный этап -> фрагментный этап» ровно та же, что в шейдерном
-/// пайплайне на GPU, а `color` и `uv` здесь — это varying.
-#[derive(Debug, Clone, Copy)]
-pub struct ShadedVertex {
-    pub clip_position: Vec4,
-    /// Цвет уже с учётом освещения, компоненты в диапазоне 0..1
-    pub color: Vec3,
-    /// Текстурная координата. У меша без развёртки — нули: тогда вся грань
-    /// читает один и тот же тексель, что безобидно, потому что текстуры
-    /// у такого инстанса всё равно нет
-    pub uv: Vec2,
-}
-
-impl ShadedVertex {
-    pub fn new(clip_position: Vec4, color: Vec3) -> Self {
-        Self {
-            clip_position,
-            color,
-            uv: Vec2::ZERO,
-        }
-    }
-
-    pub fn with_uv(mut self, uv: Vec2) -> Self {
-        self.uv = uv;
-        self
-    }
-}
-
-/// Состояние отрисовки: куда пишем и чем.
-///
-/// Два времени жизни, а не одно, и это не придирка компилятора. `frame` —
-/// изменяемая ссылка, а `&mut` инвариантен: его время жизни нельзя молча
-/// укоротить до более короткого. Текстура же приезжает из инстанса, то есть
-/// живёт ровно столько, сколько одолжена сцена, — а это заведомо меньше, чем
-/// живёт буфер кадра, пришедший снаружи. Слепив оба в одно время жизни, мы бы
-/// потребовали от текстуры невозможного
-/// Состояние отрисовки: куда пишем и чем.
-///
-/// `frame` и `depth` — это НЕ обязательно весь кадр, а горизонтальная полоса
-/// из него: при многопоточной растеризации каждый поток получает свой
-/// непересекающийся кусок обоих буферов. Отсюда разделение полей:
-///
-/// - `height` — высота всего кадра. От неё зависит перевод NDC в пиксели,
-///   и она обязана остаться прежней, иначе полоса нарисует своё содержимое
-///   в масштабе полосы, а не кадра;
-/// - `y_offset` и `rows` — где эта полоса лежит и какая она высокая. По ним
-///   растеризатор обрезает треугольник по Y и переводит номер строки кадра
-///   в номер строки внутри полосы.
-///
-/// У однопоточного пути `y_offset = 0`, `rows = height` — то есть «полоса»
-/// совпадает со всем кадром, и никакой особой ветки для него не нужно
-pub struct DrawContext<'frame, 'tex> {
-    pub frame: &'frame mut [u8],
-    pub depth: &'frame mut [f32],
-    pub width: u32,
-    /// Высота ВСЕГО кадра, а не полосы
-    pub height: u32,
-    /// Номер первой строки полосы в кадре
-    pub y_offset: u32,
-    /// Сколько строк в полосе
-    pub rows: u32,
-    /// Цвет проволочных линий: у них атрибутов нет, цвет задаётся снаружи
-    pub color: [u8; 4],
-    /// Текстура текущего инстанса. Как и `color` — состояние, которое сцена
-    /// переключает между объектами, а не свойство кадра
-    pub texture: Option<&'tex Texture>,
-}
-
-impl<'frame, 'tex> DrawContext<'frame, 'tex> {
-    /// Контекст на весь кадр целиком
-    pub fn new(
-        frame: &'frame mut [u8],
-        depth: &'frame mut [f32],
-        width: u32,
-        height: u32,
-        color: [u8; 4],
-    ) -> Self {
-        Self::band(frame, depth, width, height, 0, height, color)
-    }
-
-    /// Контекст на одну горизонтальную полосу кадра.
-    ///
-    /// `frame` и `depth` должны быть срезами ровно этой полосы, а `height` —
-    /// по-прежнему высотой всего кадра
-    #[allow(clippy::too_many_arguments)]
-    pub fn band(
-        frame: &'frame mut [u8],
-        depth: &'frame mut [f32],
-        width: u32,
-        height: u32,
-        y_offset: u32,
-        rows: u32,
-        color: [u8; 4],
-    ) -> Self {
-        Self {
-            frame,
-            depth,
-            width,
-            height,
-            y_offset,
-            rows,
-            color,
-            texture: None,
-        }
-    }
-
-    /// Единственное место, где считается индекс пикселя и проверяются границы
-    /// Запись без теста глубины (для проволочных линий)
-    #[inline]
-    pub fn set_pixel(&mut self, x: i32, y: i32) {
-        // Границы теперь по полосе, а не по кадру: линия, пересекающая
-        // несколько полос, рисуется по кускам — каждый в своём потоке
-        if x < 0 || x >= self.width as i32 {
-            return;
-        }
-        if y < self.y_offset as i32 || y >= (self.y_offset + self.rows) as i32 {
-            return;
-        }
-
-        let row = y as usize - self.y_offset as usize;
-        let index = (row * self.width as usize + x as usize) * 4;
-        self.frame[index..index + 4].copy_from_slice(&self.color);
-    }
-
-    /// Запись с тестом глубины. `inv_w` — величина 1/w: чем больше, тем ближе.
-    /// Координаты уже проверены растеризатором, границы не трогаем.
-    ///
-    /// `y` — номер строки в КАДРЕ, не в полосе: растеризатор мыслит экраном
-    /// и о нарезке не знает. Пересчёт в строку полосы — здесь.
-    ///
-    /// Цвет приходит параметром, а не из `self`: у залитого треугольника он
-    /// свой в каждом пикселе — это и есть результат интерполяции.
-    #[inline]
-    pub fn set_pixel_depth(&mut self, x: usize, y: usize, inv_w: f32, color: Vec3) {
-        let i = (y - self.y_offset as usize) * self.width as usize + x;
-
-        if inv_w <= self.depth[i] {
-            return;
-        }
-
-        self.depth[i] = inv_w;
-
-        let p = i * 4;
-        // Смешивания нет, пиксель всегда непрозрачный. Когда появится
-        // прозрачность, альфа станет таким же интерполируемым атрибутом
-        self.frame[p..p + 4].copy_from_slice(&[
-            channel_to_u8(color.x),
-            channel_to_u8(color.y),
-            channel_to_u8(color.z),
-            255,
-        ]);
-    }
-}
-
-/// Канал 0..1 -> байт. Интерполяция может слегка вылезти за диапазон
-/// из-за ошибок f32, поэтому зажимаем
-#[inline]
-fn channel_to_u8(value: f32) -> u8 {
-    (value * 255.0).clamp(0.0, 255.0) as u8
-}
-
-// Perspective Divide
-fn clip_to_ndc(v: Vec4) -> Vec3 {
-    Vec3 {
-        x: v.x / v.w,
-        y: v.y / v.w,
-        z: v.z / v.w,
-    }
-}
-
-// Viewport Transform
-fn ndc_to_screen(v: Vec3, width: u32, height: u32) -> (i32, i32) {
-    let x = ((v.x + 1.0) * 0.5 * width as f32).round() as i32;
-
-    let y = ((1.0 - v.y) * 0.5 * height as f32).round() as i32;
-
-    (x, y)
-}
-
-/// NDC -> экран, но в f32: округление здесь убило бы точность краёв
-fn ndc_to_screen_f(x: f32, y: f32, width: u32, height: u32) -> (f32, f32) {
-    (
-        (x + 1.0) * 0.5 * width as f32,
-        (1.0 - y) * 0.5 * height as f32,
-    )
-}
+use super::{DrawContext, ShadedVertex, screen::ndc_to_screen_f};
 
 /// Знаковая площадь параллелограмма на векторах (a->b) и (a->p)
 #[inline]
 fn edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     (bx - ax) * (py - ay) - (by - ay) * (px - ax)
-}
-
-pub fn draw_triangle_wireframe(v0: Vec4, v1: Vec4, v2: Vec4, ctx: &mut DrawContext) {
-    draw_clipped_edge(v0, v1, ctx);
-    draw_clipped_edge(v1, v2, ctx);
-    draw_clipped_edge(v2, v0, ctx);
 }
 
 pub fn draw_triangle_filled(
@@ -336,71 +135,6 @@ pub fn draw_triangle_filled(
     }
 }
 
-fn draw_clipped_edge(start: Vec4, end: Vec4, ctx: &mut DrawContext) {
-    if let Some((c0, c1)) = clip_line_4d(start, end) {
-        let ndc0 = clip_to_ndc(c0);
-        let ndc1 = clip_to_ndc(c1);
-
-        let p0 = ndc_to_screen(ndc0, ctx.width, ctx.height);
-
-        let p1 = ndc_to_screen(ndc1, ctx.width, ctx.height);
-
-        draw_line(p0.0, p0.1, p1.0, p1.1, ctx);
-    }
-}
-
-fn draw_line(x0: i32, y0: i32, x1: i32, y1: i32, ctx: &mut DrawContext) {
-    let dx = (x1 - x0).abs();
-    let dy = (y1 - y0).abs();
-    let sx = if x0 < x1 { 1 } else { -1 };
-    let sy = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx - dy;
-
-    let mut x = x0;
-    let mut y = y0;
-
-    loop {
-        ctx.set_pixel(x, y);
-
-        if x == x1 && y == y1 {
-            break;
-        }
-        let e2 = 2 * err;
-        if e2 > -dy {
-            err -= dy;
-            x += sx;
-        }
-        if e2 < dx {
-            err += dx;
-            y += sy;
-        }
-    }
-}
-
-/// Заливка всего буфера одним цветом
-pub fn clear_frame(frame: &mut [u8], color: [u8; 4]) {
-    if frame.is_empty() {
-        return;
-    }
-
-    // Быстрый путь: если все четыре байта одинаковые, это обычный memset
-    if color[0] == color[1] && color[1] == color[2] && color[2] == color[3] {
-        frame.fill(color[0]);
-        return;
-    }
-
-    // Общий случай: пишем один пиксель, дальше удваиваем уже заполненный
-    // участок через memcpy — за log2(N) итераций
-    frame[0..4].copy_from_slice(&color);
-
-    let mut filled = 4;
-    while filled < frame.len() {
-        let chunk = filled.min(frame.len() - filled);
-        frame.copy_within(0..chunk, filled);
-        filled += chunk;
-    }
-}
-
 /// Грань повёрнута от камеры?
 /// Соглашение: обход против часовой стрелки при взгляде снаружи.
 pub fn is_backface(v0: Vec4, v1: Vec4, v2: Vec4) -> bool {
@@ -427,6 +161,10 @@ pub fn is_backface(v0: Vec4, v1: Vec4, v2: Vec4) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        math::{Vec2, Vec3},
+        texture::Texture,
+    };
 
     const WIDTH: u32 = 100;
     const HEIGHT: u32 = 100;
