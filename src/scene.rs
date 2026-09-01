@@ -713,6 +713,12 @@ fn shade_instance<'a>(
     let model_matrix = instance.get_model_matrix();
     let mvp_matrix = vp_matrix * &model_matrix;
 
+    // Нормали едут НЕ по модельной матрице: при неравномерном масштабе она
+    // поворачивает их не туда (подробности — в `Mat4::normal_matrix`).
+    // Считается один раз на инстанс, а не на вершину: обращение матрицы стоит
+    // порядка сотни операций, и в вершинном цикле это было бы заметно
+    let normal_matrix = model_matrix.normal_matrix();
+
     // Текстура — состояние на весь инстанс, как и на GPU: она
     // «привязывается» один раз перед отрисовкой объекта. Здесь она всё же
     // копируется в каждый треугольник: список плоский, инстанс из него
@@ -734,7 +740,7 @@ fn shade_instance<'a>(
     for vertex in &mesh.vertices {
         clip_vertices.push(&mvp_matrix * vertex.position);
 
-        let normal = model_matrix.transform_dir(vertex.normal).normalize();
+        let normal = normal_matrix.transform_dir(vertex.normal).normalize();
         let lambert = normal.dot(&light_dir).max(0.0);
 
         intensities.push(AMBIENT_LIGHT + (1.0 - AMBIENT_LIGHT) * lambert);

@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use xd_engine::{
+    config::{AMBIENT_LIGHT, LIGHT_DIRECTION},
     math::Vec3,
     scene::{Assets, Instance, Mesh, MeshId, Scene, TextureId},
     texture::Texture,
@@ -169,6 +170,83 @@ fn face_turned_towards_the_light_is_brighter_than_one_turned_away() {
         "сверху {:?}, снизу {:?}",
         brightest(&from_above),
         brightest(&from_below)
+    );
+}
+
+#[test]
+fn squashing_an_object_turns_its_normals_towards_the_light() {
+    // Неравномерный масштаб — единственный случай, где нормаль нельзя гнать
+    // по модельной матрице. Сплющим наклонную грань по Y: она станет ПОЛОЖЕ,
+    // то есть её нормаль обязана повернуться К оси Y, а свет у нас как раз
+    // сверху — значит грань станет ЯРЧЕ. Наивное умножение сплющит вместе с
+    // гранью и саму нормаль, положит её набок, и грань потемнеет.
+    //
+    // Одна-единственная грань вместо готового меша нарочно: у куба нормали
+    // идут по осям, и масштаб по осям меняет им только длину, а её съедает
+    // normalize() — на кубе эта ошибка не видна вообще.
+    const SQUASH: f32 = 0.3;
+
+    let slope = |world: &mut World, scale_y: f32| {
+        let mesh = world.add_mesh(Mesh::flat_shaded(
+            &[
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, -1.0),
+            ],
+            &[[0, 1, 2]],
+        ));
+
+        let face = world.scene.spawn(mesh, Vec3::new(0.0, 0.0, 0.0));
+        face.scale = Vec3::new(1.0, scale_y, 1.0);
+        face.color = [255, 255, 255, 255];
+    };
+
+    let brightest = |frame: &[u8]| face_colors(frame).iter().map(|c| c[0]).max().unwrap();
+
+    // Ожидание считается на бумаге, а не повторением кода. Нормаль грани по
+    // построению — cross((2,0,0), (1,2,-1)) = (0, 2, 4). Честная нормаль
+    // сплющенной грани получается делением на масштаб (это и есть обратная
+    // транспонированная для диагональной матрицы), наивная — умножением
+    let lit = |normal: Vec3| {
+        let lambert = normal
+            .normalize()
+            .dot(&LIGHT_DIRECTION.normalize())
+            .max(0.0);
+
+        ((AMBIENT_LIGHT + (1.0 - AMBIENT_LIGHT) * lambert) * 255.0) as u8
+    };
+
+    let expected_plain = lit(Vec3::new(0.0, 2.0, 4.0)); // 225
+    let expected_squashed = lit(Vec3::new(0.0, 2.0 / SQUASH, 4.0)); // 240
+    let expected_naive = lit(Vec3::new(0.0, 2.0 * SQUASH, 4.0)); // 194
+
+    let mut plain = World::new();
+    slope(&mut plain, 1.0);
+
+    let mut squashed = World::new();
+    slope(&mut squashed, SQUASH);
+
+    let got_plain = brightest(&render(&plain));
+    let got_squashed = brightest(&render(&squashed));
+
+    // Допуск в единицу, а не точное равенство: цвет вершины едет через
+    // интерполяцию с делением на w, и хотя у всех трёх вершин он одинаковый,
+    // последний бит мантиссы после деления совпадать не обязан
+    assert!(
+        got_plain.abs_diff(expected_plain) <= 1,
+        "без масштаба: ожидали {expected_plain}, получили {got_plain}"
+    );
+    assert!(
+        got_squashed.abs_diff(expected_squashed) <= 1,
+        "сплющенная: ожидали {expected_squashed}, получили {got_squashed}"
+    );
+
+    // Главное утверждение: сплющенная грань СВЕТЛЕЕ. Наивный перенос нормали
+    // дал бы {expected_naive} — темнее исходной, то есть тест покраснел бы
+    assert!(
+        got_squashed > got_plain,
+        "сплющенная {got_squashed} не ярче исходной {got_plain}; \
+         наивный перенос нормали дал бы {expected_naive}"
     );
 }
 
