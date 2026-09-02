@@ -1,4 +1,7 @@
-use crate::{config::EPSILON, math::Vec4};
+use crate::{
+    config::EPSILON,
+    math::{Vec2, Vec4},
+};
 
 use super::{DrawContext, ShadedVertex, screen::ndc_to_screen_f};
 
@@ -6,6 +9,87 @@ use super::{DrawContext, ShadedVertex, screen::ndc_to_screen_f};
 #[inline]
 fn edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+}
+
+/// Насколько быстро интерполируемые величины меняются при шаге на пиксель.
+///
+/// Нужно мип-уровням: чтобы выбрать уровень пирамиды, надо знать отпечаток
+/// пикселя в текселях, то есть производные UV по экрану.
+///
+/// Хранятся производные НЕ самого UV, а тех двух величин, которые линейны по
+/// экрану: `uv/w` и `1/w`. У них производные постоянны на весь треугольник —
+/// поэтому и считаются один раз здесь, а не в цикле по пикселям. Само UV
+/// линейным не является, и его производная в каждом пикселе своя;
+/// [`Gradients::uv_derivatives`] достаёт её из этих четырёх констант
+struct Gradients {
+    uv_over_w_dx: Vec2,
+    uv_over_w_dy: Vec2,
+    inv_w_dx: f32,
+    inv_w_dy: f32,
+}
+
+impl Gradients {
+    /// `uv_over_w` и `inv_w` — уже поделённые на w атрибуты вершин,
+    /// `bary_scale` — общий множитель, превращающий знаковую площадь
+    /// в барицентрическую координату
+    fn of_triangle(
+        p0: [f32; 2],
+        p1: [f32; 2],
+        p2: [f32; 2],
+        uv_over_w: [Vec2; 3],
+        inv_w: [f32; 3],
+        bary_scale: f32,
+    ) -> Self {
+        let ([x0, y0], [x1, y1], [x2, y2]) = (p0, p1, p2);
+
+        // Барицентрика b_i = edge_i * bary_scale, а edge — многочлен первой
+        // степени по (x, y), поэтому её производные — просто коэффициенты:
+        // у edge(a, b, p) производная по x равна -(b.y - a.y), по y равна
+        // (b.x - a.x). Дальше остаётся домножить на общий масштаб
+        let db_dx = [
+            -(y2 - y1) * bary_scale,
+            -(y0 - y2) * bary_scale,
+            -(y1 - y0) * bary_scale,
+        ];
+        let db_dy = [
+            (x2 - x1) * bary_scale,
+            (x0 - x2) * bary_scale,
+            (x1 - x0) * bary_scale,
+        ];
+
+        let combine_uv =
+            |db: [f32; 3]| uv_over_w[0] * db[0] + uv_over_w[1] * db[1] + uv_over_w[2] * db[2];
+        let combine_w = |db: [f32; 3]| inv_w[0] * db[0] + inv_w[1] * db[1] + inv_w[2] * db[2];
+
+        Self {
+            uv_over_w_dx: combine_uv(db_dx),
+            uv_over_w_dy: combine_uv(db_dy),
+            inv_w_dx: combine_w(db_dx),
+            inv_w_dy: combine_w(db_dy),
+        }
+    }
+
+    /// Производные самого UV в конкретном пикселе.
+    ///
+    /// Вывод. По экрану линейны `U = uv/w` и `W = 1/w`, а нужное нам
+    /// `uv = U / W`. Производная частного:
+    ///
+    /// ```text
+    /// d(U/W)/dx = (U' · W − U · W') / W²  =  (U' − uv · W') / W  =  (U' − uv · W') · w
+    /// ```
+    ///
+    /// То есть хватает уже посчитанных в этом пикселе `uv` и `w` плюс двух
+    /// констант треугольника — ни второй интерполяции, ни соседних пикселей
+    /// не нужно. Настоящие видеокарты, кстати, идут другим путём: они считают
+    /// разность внутри квадрата 2×2 пикселя, и именно поэтому производные
+    /// доступны только во фрагментном шейдере
+    #[inline]
+    fn uv_derivatives(&self, uv: Vec2, w: f32) -> (Vec2, Vec2) {
+        (
+            (self.uv_over_w_dx - uv * self.inv_w_dx) * w,
+            (self.uv_over_w_dy - uv * self.inv_w_dy) * w,
+        )
+    }
 }
 
 pub fn draw_triangle_filled(
@@ -60,6 +144,22 @@ pub fn draw_triangle_filled(
     // не гадаем, а нормируем по фактическому знаку
     let sign = if area > 0.0 { 1.0 } else { -1.0 };
     let inv_area = 1.0 / area.abs();
+
+    // Мип-уровню нужно знать, насколько быстро UV бежит по экрану. Считаем это
+    // только если текстура спросит: производные стоят нескольких умножений на
+    // КАЖДЫЙ закрашенный пиксель, и платить за них зря не хочется
+    let gradients = texture
+        .filter(|texture| texture.needs_derivatives())
+        .map(|_| {
+            Gradients::of_triangle(
+                [x0, y0],
+                [x1, y1],
+                [x2, y2],
+                [uv0, uv1, uv2],
+                [iw0, iw1, iw2],
+                sign * inv_area,
+            )
+        });
 
     // Габаритный прямоугольник, обрезанный по экрану —
     // здесь же бесплатно происходит отсечение по краям
@@ -125,7 +225,17 @@ pub fn draw_triangle_filled(
                 Some(texture) => {
                     let uv = (uv0 * b0 + uv1 * b1 + uv2 * b2) * w;
 
-                    color * texture.sample(uv)
+                    let texel = match &gradients {
+                        // Есть мип-уровни — надо знать отпечаток пикселя
+                        Some(gradients) => {
+                            let (duv_dx, duv_dy) = gradients.uv_derivatives(uv, w);
+
+                            texture.sample_grad(uv, duv_dx, duv_dy)
+                        }
+                        None => texture.sample(uv),
+                    };
+
+                    color * texel
                 }
                 None => color,
             };

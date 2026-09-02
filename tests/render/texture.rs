@@ -3,10 +3,10 @@
 use xd_engine::{
     math::Vec3,
     scene::{Instance, Mesh, TextureId},
-    texture::Texture,
+    texture::{Magnify, Minify, Texture},
 };
 
-use crate::harness::{WIDTH, World, face_colors, render, tilted_cube};
+use crate::harness::{HEIGHT, WIDTH, World, face_colors, render, tilted_cube};
 
 /// Шахматка 2×2 клетки: белая и красная.
 ///
@@ -142,4 +142,112 @@ fn colour_switches_in_row(frame: &[u8], y: u32) -> usize {
         .zip(row.chunks_exact(4).skip(1))
         .filter(|(a, b)| a != b)
         .count()
+}
+
+/// Пол с мелкой плиткой, уходящий к горизонту, и камера низко над ним
+fn horizon_floor(magnify: Magnify, minify: Minify) -> Vec<u8> {
+    let mut world = World::new();
+
+    // Плитка мелкая: UV домножается на 40, значит на полу 40x40 копий
+    // картинки. У горизонта в один пиксель попадает целая пачка текселей
+    let mut mesh = Mesh::create_cube();
+    for vertex in &mut mesh.vertices {
+        vertex.uv = vertex.uv * 40.0;
+    }
+
+    let mesh = world.add_mesh(mesh);
+    let texture = world.add_texture(
+        Texture::checker(8, 2, [255, 255, 255, 255], [0, 0, 0, 255]).with_filter(magnify, minify),
+    );
+
+    let floor = world.scene.spawn(mesh, Vec3::new(0.0, -1.0, 0.0));
+    floor.scale = Vec3::new(60.0, 0.1, 60.0);
+    floor.color = [255, 255, 255, 255];
+    floor.texture = Some(texture);
+
+    // Камера чуть выше пола и смотрит почти горизонтально: так плитка уходит
+    // до самого горизонта, и отпечаток пикселя растёт по всей высоте кадра
+    world.scene.camera_position = Vec3::new(0.0, -0.6, 0.0);
+    world.scene.pitch = -2.0;
+
+    render(&world)
+}
+
+/// Полная вариация строки: сумма модулей скачков яркости между соседями.
+///
+/// Это и есть мера ряби. Числом ПЕРЕХОДОВ её не измерить: плавный градиент
+/// меняется в каждом пикселе и даёт переходов даже больше, чем рябь, — просто
+/// каждый крошечный. Важна не частота изменений, а их размах
+fn total_variation_in_row(frame: &[u8], y: u32) -> u32 {
+    let row_start = (y * WIDTH * 4) as usize;
+    let row = &frame[row_start..row_start + (WIDTH * 4) as usize];
+
+    row.chunks_exact(4)
+        .zip(row.chunks_exact(4).skip(1))
+        .map(|(a, b)| a[0].abs_diff(b[0]) as u32)
+        .sum()
+}
+
+#[test]
+fn mipmaps_calm_down_the_floor_at_the_horizon() {
+    // Рябь у горизонта — не дефект выборки, а следствие того, что текселей
+    // в пикселе больше одного. Ближайший сосед берёт из пачки один, и при
+    // малейшем сдвиге камеры выбранный меняется: картинка кипит.
+    //
+    // Мип-уровни это и лечат. Меряем полной вариацией строки, и обе половины
+    // важны: вдали рябь обязана пропасть, а ВБЛИЗИ картинка обязана остаться
+    // такой же резкой. Без второй половины тест прошёл бы и от «всегда брать
+    // самый грубый уровень» — то есть от честного размытия всего кадра.
+    //
+    // Заодно это единственный тест, который вообще проверяет производные UV
+    // в растеризаторе: сама текстура их только принимает, а считает
+    // `Gradients` в renderer/triangle.rs, и ошибка там видна ровно здесь
+    let sharp = horizon_floor(Magnify::Nearest, Minify::Nearest);
+    let smooth = horizon_floor(Magnify::Linear, Minify::Mipmapped);
+    // Сочетание, ради которого настройки разведены на две, и то самое, что
+    // стоит в демо-сцене: вблизи ближайший сосед, вдали мип-уровни
+    let mixed = horizon_floor(Magnify::Nearest, Minify::Mipmapped);
+
+    // Горизонт при pitch = -2 стоит чуть выше середины кадра, так что
+    // середина — это уже далёкий пол, а на двадцать строк ниже — ближний
+    let far = HEIGHT / 2;
+    let near = HEIGHT / 2 + 20;
+
+    let (sharp_far, smooth_far) = (
+        total_variation_in_row(&sharp, far),
+        total_variation_in_row(&smooth, far),
+    );
+    let (sharp_near, smooth_near) = (
+        total_variation_in_row(&sharp, near),
+        total_variation_in_row(&smooth, near),
+    );
+
+    assert!(
+        sharp_far > 0,
+        "пол не попал в строку {far} — проверять нечего"
+    );
+
+    assert!(
+        smooth_far * 10 < sharp_far,
+        "рябь вдали осталась: {smooth_far} против {sharp_far}"
+    );
+
+    assert!(
+        smooth_near * 10 >= sharp_near * 8,
+        "вблизи картинку размыло зря: {smooth_near} против {sharp_near}"
+    );
+
+    // И главное — обе половины достижимы ОДНОВРЕМЕННО. Вдали `mixed` обязан
+    // вести себя как трилинейный (сжатие у них одинаковое), а вблизи —
+    // побайтово как ближайший сосед, потому что растяжение у них тоже
+    // одинаковое. Именно этого сочетания и не было, пока настройка была одна
+    assert!(
+        total_variation_in_row(&mixed, far) * 10 < sharp_far,
+        "рябь вдали осталась и у смешанной настройки"
+    );
+    assert_eq!(
+        total_variation_in_row(&mixed, near),
+        sharp_near,
+        "вблизи смешанная настройка обязана совпасть с ближайшим соседом"
+    );
 }
