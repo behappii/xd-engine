@@ -157,7 +157,9 @@ fn horizon_floor(magnify: Magnify, minify: Minify) -> Vec<u8> {
 
     let mesh = world.add_mesh(mesh);
     let texture = world.add_texture(
-        Texture::checker(8, 2, [255, 255, 255, 255], [0, 0, 0, 255]).with_filter(magnify, minify),
+        Texture::checker(8, 2, [255, 255, 255, 255], [0, 0, 0, 255])
+            .with_mipmaps()
+            .with_filter(magnify, minify),
     );
 
     let floor = world.scene.spawn(mesh, Vec3::new(0.0, -1.0, 0.0));

@@ -139,9 +139,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // закипает.
     //
     // Одной настройкой это не выразить: пришлось бы выбирать, где мириться
-    let checker = app
-        .assets
-        .add_texture(checker_image.with_filter(Magnify::Nearest, Minify::Mipmapped));
+    let checker = app.assets.add_texture(
+        checker_image
+            .with_mipmaps()
+            .with_filter(Magnify::Nearest, Minify::Mipmapped),
+    );
 
     // Куб с текстурой. Развёртка `create_cube` отдаёт каждой грани весь
     // квадрат картинки, так что она ложится на грань целиком.

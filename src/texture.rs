@@ -225,20 +225,32 @@ impl Texture {
     /// нарочно мелкая картинка — вблизи резкие квадраты, вдали никакой ряби.
     /// Одним переключателем пришлось бы выбирать: либо рябит, либо мылит.
     ///
-    /// Мип-пирамида строится ровно тогда, когда она нужна, и выбрасывается,
-    /// когда перестаёт: невозможных состояний вроде «фильтр без пирамиды» или
-    /// «пирамида без фильтра» тут просто нет
+    /// Хранения не касается: `Minify::Mipmapped` пирамиду не строит, а лишь
+    /// разрешает ею пользоваться. Строит её [`Texture::with_mipmaps`], и это
+    /// разделение намеренное — см. её доку
     pub fn with_filter(mut self, magnify: Magnify, minify: Minify) -> Self {
         self.magnify = magnify;
         self.minify = minify;
+        self
+    }
 
-        match minify {
-            Minify::Mipmapped if self.levels.len() == 1 => self.build_mipmaps(),
-            Minify::Mipmapped => {}
-            // Пирамида больше не нужна — незачем таскать лишнюю треть памяти
-            _ => self.levels.truncate(1),
-        }
-
+    /// Построить мип-пирамиду: каждый следующий уровень вдвое мельче
+    /// предыдущего, вплоть до одного текселя. Стоит трети лишней памяти.
+    ///
+    /// Отдельно от [`Texture::with_filter`], потому что это решения РАЗНОГО
+    /// рода: пирамида — про то, что лежит в памяти, фильтр — про то, как из
+    /// неё читают. Раньше они были склеены, и выходило, что настройка качества
+    /// выборки перевыделяет память. В настоящих движках наоборот: мипы
+    /// генерируются почти всегда, а сэмплер только решает, читать их или нет,
+    /// — и ползунок «фильтрация» в настройках графики поэтому ничего не
+    /// перестраивает, он правит несколько крошечных объектов-сэмплеров.
+    ///
+    /// Расцепление нужно и нам, если когда-нибудь появится такой ползунок:
+    /// иначе он дёргал бы пирамиды всех текстур сразу.
+    ///
+    /// Вызывать повторно безопасно: у готовой пирамиды работы нет
+    pub fn with_mipmaps(mut self) -> Self {
+        self.build_mipmaps();
         self
     }
 
@@ -263,9 +275,21 @@ impl Texture {
         self.levels.len()
     }
 
-    /// Есть ли у текстуры мип-пирамида
-    pub fn uses_mipmaps(&self) -> bool {
+    /// Есть ли у текстуры мип-пирамида. Про фильтр ничего не говорит
+    pub fn has_mipmaps(&self) -> bool {
         self.levels.len() > 1
+    }
+
+    /// Будут ли мип-уровни реально использоваться при выборке.
+    ///
+    /// Нужны два условия сразу: пирамида построена И фильтр её просит.
+    /// `Minify::Mipmapped` без пирамиды — не ошибка, а тихий откат к уровню 0,
+    /// ровно как в настоящих API: сэмплер с мип-режимом поверх картинки с
+    /// одним уровнем просто всегда читает этот уровень. Ловушка отсюда
+    /// очевидная — попросить мип-фильтр и забыть `with_mipmaps`, — но платить
+    /// за неё скрытым выделением памяти хуже
+    fn mipmapping(&self) -> bool {
+        self.has_mipmaps() && self.minify == Minify::Mipmapped
     }
 
     /// Нужны ли этой текстуре производные UV.
@@ -281,10 +305,10 @@ impl Texture {
     /// спрашивать не о чем, и путь по умолчанию остаётся ровно таким же
     /// быстрым, каким был до всей этой фильтрации
     pub fn needs_derivatives(&self) -> bool {
-        self.uses_mipmaps() || self.magnify != self.minify.within_level()
+        self.mipmapping() || self.magnify != self.minify.within_level()
     }
 
-    /// Достроить мип-пирамиду: каждый следующий уровень вдвое мельче
+    /// Собственно построение: каждый следующий уровень вдвое мельче
     /// и получается усреднением четвёрки текселей предыдущего.
     ///
     /// Усреднение по квадрату 2×2 — простейший из фильтров понижения, и для
@@ -373,8 +397,9 @@ impl Texture {
             return magnified(&self.levels[0], uv, self.magnify);
         }
 
-        if !self.uses_mipmaps() {
-            // Сжатие без пирамиды: фильтровать нечем, кроме исходной картинки
+        if !self.mipmapping() {
+            // Сжатие без пирамиды — либо её не построили, либо фильтр её и не
+            // просил. Фильтровать нечем, кроме исходной картинки
             return magnified(&self.levels[0], uv, self.minify.within_level());
         }
 
@@ -782,7 +807,7 @@ mod tests {
     fn the_mip_chain_halves_down_to_a_single_texel() {
         let levels = |w: u32, h: u32| {
             Texture::new(w, h, vec![Vec3::new(0.0, 0.0, 0.0); (w * h) as usize])
-                .with_filter(Magnify::Linear, Minify::Mipmapped)
+                .with_mipmaps()
                 .mip_levels()
         };
 
@@ -812,6 +837,7 @@ mod tests {
                 Vec3::new(1.0, 1.0, 1.0),
             ],
         )
+        .with_mipmaps()
         .with_filter(Magnify::Linear, Minify::Mipmapped);
 
         assert_eq!(tex.mip_levels(), 2);
@@ -832,6 +858,7 @@ mod tests {
     /// 0.5 везде. Значит по цвету видно, с какого уровня взята выборка
     fn mip_checker() -> Texture {
         Texture::checker(8, 8, [255, 255, 255, 255], [0, 0, 0, 255])
+            .with_mipmaps()
             .with_filter(Magnify::Linear, Minify::Mipmapped)
     }
 
@@ -931,17 +958,100 @@ mod tests {
     }
 
     #[test]
-    fn dropping_the_filter_drops_the_pyramid() {
-        // Невозможных состояний быть не должно: пирамида существует ровно
-        // тогда, когда есть кому её читать, и лишнюю треть памяти после
-        // переключения фильтра таскать незачем
+    fn the_filter_does_not_decide_how_much_memory_the_texture_takes() {
+        // Пирамида — решение про ПАМЯТЬ, фильтр — про то, как из неё читают.
+        // Раньше они были склеены, и настройка качества выборки перевыделяла
+        // память; теперь смена фильтра не трогает уровни вообще
         let tex = mip_checker();
-        assert!(tex.uses_mipmaps());
+        let levels = tex.mip_levels();
+        assert!(levels > 1);
 
-        let tex = tex.with_filter(Magnify::Linear, Minify::Linear);
+        let tex = tex.with_filter(Magnify::Nearest, Minify::Nearest);
+        assert_eq!(tex.mip_levels(), levels, "фильтр выбросил пирамиду");
 
-        assert_eq!(tex.mip_levels(), 1);
-        assert!(!tex.uses_mipmaps());
+        let tex = tex.with_filter(Magnify::Linear, Minify::Mipmapped);
+        assert_eq!(tex.mip_levels(), levels, "фильтр перестроил пирамиду");
+    }
+
+    #[test]
+    fn the_order_of_the_two_calls_does_not_matter() {
+        // Прямое следствие расцепления: раз одно другого не касается,
+        // порядок вызовов ничего не решает. Пока они были склеены,
+        // with_filter после построения пирамиду бы выбросил
+        let uv = Vec2::new(0.5 / 8.0, 0.5 / 8.0);
+        let squeezed = Vec2::new(2.0 / 8.0, 0.0);
+
+        let checker = || Texture::checker(8, 8, [255, 255, 255, 255], [0, 0, 0, 255]);
+
+        let first = checker()
+            .with_mipmaps()
+            .with_filter(Magnify::Linear, Minify::Mipmapped);
+        let second = checker()
+            .with_filter(Magnify::Linear, Minify::Mipmapped)
+            .with_mipmaps();
+
+        assert_eq!(first.mip_levels(), second.mip_levels());
+        assert_same(
+            first.sample_grad(uv, squeezed, Vec2::ZERO),
+            second.sample_grad(uv, squeezed, Vec2::ZERO),
+        );
+    }
+
+    #[test]
+    fn a_pyramid_nobody_asked_for_stays_unused() {
+        // Обратная сторона расцепления, и раньше такого состояния быть не
+        // могло вовсе: пирамида построена, а фильтр её не просит. Читать её
+        // в этом случае нельзя — иначе `Minify::Linear` молча превратился бы
+        // в `Mipmapped`, и отключить мип-уровни стало бы невозможно
+        let tex = mip_checker().with_filter(Magnify::Nearest, Minify::Linear);
+
+        assert!(tex.has_mipmaps(), "пирамида на месте");
+
+        let uv = Vec2::new(0.75 / 8.0, 0.5 / 8.0);
+        let squeezed = Vec2::new(2.0 / 8.0, 0.0);
+
+        // Билинейно по уровню 0 (0.75), а не серое с уровня 1 (0.5)
+        assert_same(
+            tex.sample_grad(uv, squeezed, Vec2::ZERO),
+            Vec3::new(0.75, 0.75, 0.75),
+        );
+    }
+
+    #[test]
+    fn asking_for_mipmaps_without_building_them_falls_back_to_the_base_level() {
+        // Ловушка расцепления, и она осознанная: попросить мип-фильтр и забыть
+        // построить пирамиду теперь можно. Ответ — не паника и не молчаливое
+        // выделение памяти, а откат к уровню 0, ровно как в настоящих API:
+        // сэмплер с мип-режимом поверх картинки с одним уровнем просто всегда
+        // читает этот уровень.
+        //
+        // Видно это по цвету: с пирамидой сжатие дало бы серый уровень 1,
+        // без неё — билинейную выборку по исходной шахматке
+        let forgotten = Texture::checker(8, 8, [255, 255, 255, 255], [0, 0, 0, 255])
+            .with_filter(Magnify::Nearest, Minify::Mipmapped);
+
+        assert!(!forgotten.has_mipmaps());
+        assert!(
+            forgotten.needs_derivatives(),
+            "различать растяжение и сжатие всё равно надо: настройки-то разные"
+        );
+
+        let uv = Vec2::new(0.75 / 8.0, 0.5 / 8.0);
+        let squeezed = Vec2::new(2.0 / 8.0, 0.0);
+
+        // Билинейно по уровню 0, а не серое с уровня 1
+        assert_same(
+            forgotten.sample_grad(uv, squeezed, Vec2::ZERO),
+            Vec3::new(0.75, 0.75, 0.75),
+        );
+
+        // А с пирамидой — то самое серое
+        assert_same(
+            forgotten
+                .with_mipmaps()
+                .sample_grad(uv, squeezed, Vec2::ZERO),
+            Vec3::new(0.5, 0.5, 0.5),
+        );
     }
 
     // --- растяжение и сжатие настраиваются порознь ---
@@ -996,7 +1106,7 @@ mod tests {
 
         let differing = same.with_filter(Magnify::Nearest, Minify::Linear);
         assert!(differing.needs_derivatives());
-        assert!(!differing.uses_mipmaps(), "пирамида тут ни при чём");
+        assert!(!differing.has_mipmaps(), "пирамида тут ни при чём");
     }
 
     #[test]
