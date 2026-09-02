@@ -1,4 +1,4 @@
-use crate::texture::Texture;
+use crate::texture::{Minify, Texture};
 
 use super::Mesh;
 
@@ -58,8 +58,30 @@ impl Assets {
         MeshId(self.meshes.len() - 1)
     }
 
-    /// То же для текстуры
+    /// То же для текстуры.
+    ///
+    /// Заодно достраивает мип-пирамиду, если фильтр текстуры её просит. Место
+    /// для этого правильное: регистрация — граница, на которой картинка входит
+    /// в движок, аналог загрузки текстуры на видеокарту, где мипы и
+    /// генерируются в настоящих движках.
+    ///
+    /// Раньше строить пирамиду приходилось руками, и это была ловушка:
+    /// попросил `Minify::Mipmapped`, забыл `with_mipmaps` — и получил тихий
+    /// алиасинг вместо ошибки. Забыть теперь негде.
+    ///
+    /// Обратно к «фильтр сам выделяет память» это НЕ откат. Разница в том, где
+    /// стоит решение: `with_filter` по-прежнему ничего не строит и остаётся
+    /// чистой настройкой, а память выделяется один раз, на входе в движок, где
+    /// намерение уже известно целиком
     pub fn add_texture(&mut self, texture: Texture) -> TextureId {
+        let texture = if texture.minify() == Minify::Mipmapped {
+            texture.with_mipmaps()
+        } else {
+            // Пирамида нужна не всем: у текстуры без сжатия — отладочной
+            // шахматки, атласа интерфейса — она треть памяти впустую
+            texture
+        };
+
         self.textures.push(texture);
 
         TextureId(self.textures.len() - 1)
@@ -80,5 +102,46 @@ impl Assets {
 
     pub fn texture(&self, id: TextureId) -> &Texture {
         &self.textures[id.0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::texture::Magnify;
+
+    fn checker() -> Texture {
+        Texture::checker(8, 2, [255, 255, 255, 255], [0, 0, 0, 255])
+    }
+
+    #[test]
+    fn registering_builds_the_pyramid_for_whoever_asked_for_it() {
+        // Ловушка, которую это и убирает: до переноса пирамиду надо было
+        // строить руками, и «попросил Mipmapped, забыл построить» давало
+        // тихий алиасинг вместо ошибки. Теперь забыть негде — намерение
+        // объявлено фильтром, а память выделяет регистрация
+        let mut assets = Assets::new();
+
+        let mipped = assets.add_texture(checker().with_filter(Magnify::Nearest, Minify::Mipmapped));
+
+        assert!(
+            assets.texture(mipped).has_mipmaps(),
+            "текстура просила мип-уровни и не получила их"
+        );
+    }
+
+    #[test]
+    fn a_texture_that_did_not_ask_pays_nothing() {
+        // Обратная половина, и она не менее важна: пирамида стоит трети лишней
+        // памяти, и раздавать её всем подряд незачем. Отладочной шахматке,
+        // атласу интерфейса, таблице-данных она не нужна вовсе
+        let mut assets = Assets::new();
+
+        // По умолчанию Nearest/Nearest — сжатие мип-уровней не просит
+        let plain = assets.add_texture(checker());
+        let bilinear = assets.add_texture(checker().with_filter(Magnify::Linear, Minify::Linear));
+
+        assert!(!assets.texture(plain).has_mipmaps());
+        assert!(!assets.texture(bilinear).has_mipmaps());
     }
 }
