@@ -83,18 +83,13 @@ impl EngineApp {
     /// прежнего размера. Aspect отдельно чинить не нужно: `Scene::draw`
     /// считает его из переданных размеров кадра, а не из констант
     fn resize(&mut self, physical_width: u32, physical_height: u32) {
-        // Свёрнутое окно приходит нулевым размером, а текстура нулевой ширины —
-        // ошибка в wgpu. Ничего не трогаем: буферы остаются прежними и валидными,
-        // а разворачивание окна пришлёт нормальный Resized
-        if physical_width == 0 || physical_height == 0 {
-            return;
-        }
+        let Some((frame_width, frame_height)) = frame_size(physical_width, physical_height) else {
+            return; // окно свёрнуто
+        };
 
         let Some(pixels) = self.pixels.as_mut() else {
             return;
         };
-
-        let (frame_width, frame_height) = frame_size(physical_width, physical_height);
 
         // Порядок важен: поверхность — всегда в физических пикселях окна,
         // и знать её размер надо ДО пересборки буфера, потому что от их
@@ -109,6 +104,22 @@ impl EngineApp {
             return;
         }
 
+        // Только после того, как `pixels` согласился: иначе его буфер остался бы
+        // прежнего размера, а наши поля уехали бы вперёд — и отрисовка полезла
+        // бы за границу чужого буфера
+        self.adopt_frame_size(frame_width, frame_height);
+    }
+
+    /// Принять новый размер кадра: обе размерности и depth-буфер разом.
+    ///
+    /// Отдельным методом, потому что путей сюда ДВА — создание окна и его
+    /// растягивание, — и раньше каждый обновлял эти три поля сам. Ровно то
+    /// расхождение, которого тут положено избегать: достаточно поправить один
+    /// путь и забыть про второй, чтобы глубина разъехалась с кадром.
+    ///
+    /// Окна не требует, поэтому единственное место, где живёт этот инвариант,
+    /// проверяется тестом
+    fn adopt_frame_size(&mut self, frame_width: u32, frame_height: u32) {
         // Глубина хранится по пикселю, значит её буфер обязан идти в ногу
         // с кадром. Что окажется в новых ячейках — неважно: кадр всё равно
         // начинается с fill(0.0)
@@ -118,18 +129,50 @@ impl EngineApp {
         self.frame_width = frame_width;
         self.frame_height = frame_height;
     }
+
+    /// Запомнить состояние клавиши.
+    ///
+    /// Множество ЗАЖАТЫХ клавиш, а не событий: пока клавишу держат, ОС шлёт
+    /// повторные нажатия, и в множестве от них ничего не меняется
+    fn track_key(&mut self, key: KeyCode, is_pressed: bool) {
+        if is_pressed {
+            self.pressed_keys.insert(key);
+        } else {
+            self.pressed_keys.remove(&key);
+        }
+    }
 }
 
 /// Размер буфера кадра для окна заданного физического размера.
+/// `None` — окно свёрнуто и трогать ничего не надо.
 ///
 /// Вынесено из `resize`, потому что то же самое нужно и при создании окна:
 /// `Pixels::new` хочет размер буфера сразу, до того как `resize` вообще
 /// сможет что-то поменять
-fn frame_size(physical_width: u32, physical_height: u32) -> (u32, u32) {
-    (
-        ((physical_width as f32 * RENDER_SCALE) as u32).max(1),
-        ((physical_height as f32 * RENDER_SCALE) as u32).max(1),
-    )
+fn frame_size(physical_width: u32, physical_height: u32) -> Option<(u32, u32)> {
+    frame_size_at(physical_width, physical_height, RENDER_SCALE)
+}
+
+/// То же, но масштаб задаётся явно.
+///
+/// Разделение только ради тестов, и не для галочки: `RENDER_SCALE` сейчас
+/// равен единице, а весь смысл зажима `.max(1)` виден лишь при масштабе
+/// МЕНЬШЕ единицы. Проверяй мы через `frame_size`, тест остался бы зелёным
+/// и без зажима — то есть не проверял бы ничего
+fn frame_size_at(physical_width: u32, physical_height: u32, scale: f32) -> Option<(u32, u32)> {
+    // Свёрнутое окно приходит нулевым размером, а текстура нулевой ширины —
+    // ошибка в wgpu. Ничего не трогаем: буферы остаются прежними и валидными,
+    // а разворачивание окна пришлёт нормальный Resized
+    if physical_width == 0 || physical_height == 0 {
+        return None;
+    }
+
+    // Зажим не про свёрнутое окно, а про мелкое: окно 3×2 пикселя при
+    // RENDER_SCALE = 0.25 честно даёт ноль, и на нём `Pixels` вернёт ошибку
+    Some((
+        ((physical_width as f32 * scale) as u32).max(1),
+        ((physical_height as f32 * scale) as u32).max(1),
+    ))
 }
 
 // Реализуем обязательный обработчик событий winit
@@ -154,7 +197,8 @@ impl ApplicationHandler for EngineApp {
         // размере вернёт ошибку, а тут .unwrap() — подстрахуемся
         let surface_width = size.width.max(1);
         let surface_height = size.height.max(1);
-        let (frame_width, frame_height) = frame_size(surface_width, surface_height);
+        let (frame_width, frame_height) = frame_size(surface_width, surface_height)
+            .expect("размеры только что зажаты единицей, нулевыми быть не могут");
 
         // Настраиваем пиксельный буфер pixels поверх созданного окна.
         // Два разных размера: поверхность — физические пиксели окна,
@@ -162,9 +206,7 @@ impl ApplicationHandler for EngineApp {
         let surface_texture = SurfaceTexture::new(surface_width, surface_height, window.clone());
         let pixels = Pixels::new(frame_width, frame_height, surface_texture).unwrap();
 
-        self.depth_buffer = vec![0.0; (frame_width * frame_height) as usize];
-        self.frame_width = frame_width;
-        self.frame_height = frame_height;
+        self.adopt_frame_size(frame_width, frame_height);
         self.window = Some(window);
         self.pixels = Some(pixels);
         self.last_time = Instant::now();
@@ -187,11 +229,7 @@ impl ApplicationHandler for EngineApp {
             // Cчитывание нажатий клавиш
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(key) = event.physical_key {
-                    if event.state.is_pressed() {
-                        self.pressed_keys.insert(key); // Зажали — сохраняем
-                    } else {
-                        self.pressed_keys.remove(&key); // Отжали — стираем
-                    }
+                    self.track_key(key, event.state.is_pressed());
 
                     // Быстрый выход из игры по кнопке Escape на системном уровне
                     if key == KeyCode::Escape {
@@ -265,5 +303,128 @@ impl ApplicationHandler for EngineApp {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Окна тут не создаётся ни одного, и это главное условие: тест обязан
+    // работать без экрана и без видеокарты. Поэтому проверяется ровно то, что
+    // от winit и pixels не зависит, — арифметика размеров, инвариант буферов
+    // и учёт нажатых клавиш
+
+    // --- размер буфера кадра ---
+
+    #[test]
+    fn render_scale_shrinks_the_buffer_but_not_the_window() {
+        // Смысл RENDER_SCALE: буфер мельче окна, растянуть его обратно — работа
+        // видеокарты внутри `pixels`, и она бесплатная. Цена кадра линейна по
+        // числу пикселей, так что это прямой размен резкости на FPS
+        assert_eq!(frame_size_at(800, 600, 1.0), Some((800, 600)));
+        assert_eq!(frame_size_at(800, 600, 0.5), Some((400, 300)));
+        assert_eq!(frame_size_at(800, 600, 2.0), Some((1600, 1200)));
+    }
+
+    #[test]
+    fn a_tiny_window_still_gets_at_least_one_pixel() {
+        // Ради этого случая стоит `.max(1)`: окно 3×2 при масштабе 0.25 честно
+        // даёт нули, а буфер нулевой ширины — ошибка в `Pixels::new`.
+        //
+        // Проверять это через `frame_size` было бы бесполезно: RENDER_SCALE
+        // сейчас равен единице, и до нуля там не доходит ни при каком размере
+        assert_eq!(frame_size_at(3, 2, 0.25), Some((1, 1)));
+        assert_eq!(frame_size_at(1, 1, 0.5), Some((1, 1)));
+    }
+
+    #[test]
+    fn a_minimised_window_is_ignored_entirely() {
+        // Свёрнутое окно приходит нулевым размером. Ответ не «буфер 1×1», а
+        // «не трогать вообще ничего»: старые буферы остаются валидными, а
+        // разворачивание пришлёт нормальный Resized
+        assert_eq!(frame_size_at(0, 600, 1.0), None);
+        assert_eq!(frame_size_at(800, 0, 1.0), None);
+        assert_eq!(frame_size_at(0, 0, 1.0), None);
+    }
+
+    #[test]
+    fn the_default_path_uses_the_configured_scale() {
+        // Связка между двумя формами: одна берёт масштаб из конфига, вторая
+        // параметром. Разъедутся — и тесты выше начнут проверять не тот код,
+        // который работает в игре.
+        //
+        // Честно про его силу: пока RENDER_SCALE равен единице, подмену
+        // масштаба на зашитую 1.0 этот тест не отличит. А вот потерю
+        // делегирования целиком — отличит, потому что вместе с ним потеряется
+        // и обработка свёрнутого окна: это проверяет вторая строка
+        assert_eq!(frame_size(800, 600), frame_size_at(800, 600, RENDER_SCALE));
+        assert_eq!(frame_size(0, 600), None);
+    }
+
+    // --- инвариант буферов ---
+
+    #[test]
+    fn a_fresh_app_has_no_frame_until_the_window_appears() {
+        // Пока окна нет, спрашивать размер не у кого: настоящие значения
+        // проставит `resumed`, когда ОС наконец выдаст окно
+        let app = EngineApp::new();
+
+        assert_eq!((app.frame_width, app.frame_height), (0, 0));
+        assert!(app.depth_buffer.is_empty());
+    }
+
+    #[test]
+    fn the_depth_buffer_always_matches_the_frame_size() {
+        // Тот самый инвариант, ради которого `adopt_frame_size` вообще заведён.
+        // Глубина хранится по пикселю, и стоит ей отстать от кадра — отрисовка
+        // либо полезет за границу буфера, либо не дорисует нижние строки.
+        //
+        // Последовательность нарочно ходит и вверх, и вниз: на уменьшении
+        // ломается наивное «дорастить, если не хватает»
+        let mut app = EngineApp::new();
+
+        for (width, height) in [(800, 600), (200, 150), (1920, 1080), (1, 1), (640, 480)] {
+            app.adopt_frame_size(width, height);
+
+            assert_eq!((app.frame_width, app.frame_height), (width, height));
+            assert_eq!(
+                app.depth_buffer.len(),
+                (width * height) as usize,
+                "глубина отстала от кадра {width}x{height}"
+            );
+        }
+    }
+
+    // --- клавиатура ---
+
+    #[test]
+    fn a_held_key_stays_pressed_exactly_once_and_leaves_on_release() {
+        // pressed_keys — множество ЗАЖАТЫХ клавиш, а не журнал событий. Пока
+        // клавишу держат, ОС шлёт повторные нажатия, и от них не должно
+        // меняться ничего.
+        //
+        // Тест краснеет, если перепутать ветки press/release: тогда камера
+        // поедет на отпускании клавиши, а не на нажатии
+        let mut app = EngineApp::new();
+
+        app.track_key(KeyCode::KeyW, true);
+        app.track_key(KeyCode::KeyW, true); // автоповтор
+        app.track_key(KeyCode::KeyD, true);
+
+        assert!(app.pressed_keys.contains(&KeyCode::KeyW));
+        assert!(app.pressed_keys.contains(&KeyCode::KeyD));
+        assert_eq!(app.pressed_keys.len(), 2);
+
+        app.track_key(KeyCode::KeyW, false);
+
+        assert!(!app.pressed_keys.contains(&KeyCode::KeyW));
+        assert!(app.pressed_keys.contains(&KeyCode::KeyD));
+
+        // Отпускание незажатой клавиши — не ошибка: так приходит, например,
+        // клавиша, нажатая ещё до запуска окна
+        app.track_key(KeyCode::KeyW, false);
+
+        assert_eq!(app.pressed_keys.len(), 1);
     }
 }
