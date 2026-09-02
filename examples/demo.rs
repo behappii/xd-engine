@@ -88,12 +88,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Клеток больше, чем у пола: на 24 долях пара клеток слилась бы в полосы.
     // Фильтрация тут нарочно не включается: шахматка на шаре нужна резкой,
     // размытая перестанет показывать, где сошёлся шов развёртки
-    let globe = app.assets.add_texture(Texture::checker(
-        64,
-        8,
-        [230, 230, 230, 255],
-        [40, 40, 60, 255],
-    ));
+    let globe = app.assets.add_texture(
+        Texture::checker(64, 8, [230, 230, 230, 255], [40, 40, 60, 255])
+            .with_filter(Magnify::Nearest, Minify::Mipmapped),
+    );
     let sphere_mesh = app.assets.add_mesh(Mesh::create_sphere(16, 24));
 
     let mut obj5 = Instance::new(sphere_mesh, Vec3::new(1.8, 0.7, 0.0))
@@ -238,10 +236,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Проверяем зажатые клавиши через метод .contains() хэш-карты
         if pressed_keys.contains(&KeyCode::KeyW) {
-            scene.camera_position = scene.camera_position + forward * movement_speed;
+            scene.camera_position = Vec3 {
+                x: scene.camera_position.x + forward.x * movement_speed,
+                y: scene.camera_position.y,
+                z: scene.camera_position.z + forward.z * movement_speed,
+            };
         }
         if pressed_keys.contains(&KeyCode::KeyS) {
-            scene.camera_position = scene.camera_position - forward * movement_speed;
+            scene.camera_position = Vec3 {
+                x: scene.camera_position.x - forward.x * movement_speed,
+                y: scene.camera_position.y,
+                z: scene.camera_position.z - forward.z * movement_speed,
+            };
         }
         if pressed_keys.contains(&KeyCode::KeyA) {
             scene.camera_position = scene.camera_position - right * movement_speed;
