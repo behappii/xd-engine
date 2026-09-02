@@ -104,11 +104,20 @@ impl Texture {
     /// Собрать текстуру из готовых текселей построчно, слева направо
     /// и сверху вниз.
     ///
+    /// Не публичный, и это про обещания: `Vec<Vec3>` — прямой слепок
+    /// внутреннего представления, то есть выставив его наружу, мы пообещали
+    /// бы, что тексели навсегда останутся тройками f32 в диапазоне 0..1.
+    /// А это как раз то, что может захотеться поменять — упаковать в байты
+    /// ради памяти, например. Снаружи ту же работу делает `from_rgba8`,
+    /// ничего лишнего не обещая. Если понадобится путь без квантования в
+    /// байты, заводить его надо отдельным именованным конструктором вроде
+    /// `from_rgb_f32`, у которого контракт написан явно.
+    ///
     /// Паникует на пустом размере и на несовпадении длины: текстура нулевой
     /// ширины сломала бы выборку делением на ноль, а «почти правильная»
     /// длина — это опечатка, которую лучше поймать сразу, чем разглядывать
     /// потом косые полосы на модели
-    pub fn new(width: u32, height: u32, texels: Vec<Vec3>) -> Self {
+    pub(crate) fn new(width: u32, height: u32, texels: Vec<Vec3>) -> Self {
         assert!(width > 0 && height > 0, "текстура нулевого размера");
         assert_eq!(
             texels.len(),
@@ -262,11 +271,10 @@ impl Texture {
         self
     }
 
-    pub fn magnify(&self) -> Magnify {
-        self.magnify
-    }
-
-    pub fn minify(&self) -> Minify {
+    /// Что делать при сжатии. Нужно `Assets::add_texture`, чтобы решить,
+    /// достраивать ли пирамиду; наружу это ничего не даёт — фильтр
+    /// пользователь сам же и задал
+    pub(crate) fn minify(&self) -> Minify {
         self.minify
     }
 
@@ -278,13 +286,8 @@ impl Texture {
         self.levels[0].height
     }
 
-    /// Сколько уровней в пирамиде. Единица — пирамиды нет
-    pub fn mip_levels(&self) -> usize {
-        self.levels.len()
-    }
-
     /// Есть ли у текстуры мип-пирамида. Про фильтр ничего не говорит
-    pub fn has_mipmaps(&self) -> bool {
+    pub(crate) fn has_mipmaps(&self) -> bool {
         self.levels.len() > 1
     }
 
@@ -807,8 +810,8 @@ mod tests {
         // перестаёт показывать развёртку
         let tex = two_texels();
 
-        assert_eq!(tex.magnify(), Magnify::Nearest);
-        assert_eq!(tex.minify(), Minify::Nearest);
+        assert_eq!(tex.magnify, Magnify::Nearest);
+        assert_eq!(tex.minify, Minify::Nearest);
         assert!(
             !tex.needs_derivatives(),
             "по умолчанию режим один и тот же — производные ни к чему"
@@ -823,7 +826,8 @@ mod tests {
         let levels = |w: u32, h: u32| {
             Texture::new(w, h, vec![Vec3::new(0.0, 0.0, 0.0); (w * h) as usize])
                 .with_mipmaps()
-                .mip_levels()
+                .levels
+                .len()
         };
 
         assert_eq!(levels(8, 8), 4); // 8, 4, 2, 1
@@ -855,7 +859,7 @@ mod tests {
         .with_mipmaps()
         .with_filter(Magnify::Linear, Minify::Mipmapped);
 
-        assert_eq!(tex.mip_levels(), 2);
+        assert_eq!(tex.levels.len(), 2);
 
         // Огромный отпечаток — заведомо самый грубый уровень
         let huge = Vec2::new(1000.0, 1000.0);
@@ -978,14 +982,14 @@ mod tests {
         // Раньше они были склеены, и настройка качества выборки перевыделяла
         // память; теперь смена фильтра не трогает уровни вообще
         let tex = mip_checker();
-        let levels = tex.mip_levels();
+        let levels = tex.levels.len();
         assert!(levels > 1);
 
         let tex = tex.with_filter(Magnify::Nearest, Minify::Nearest);
-        assert_eq!(tex.mip_levels(), levels, "фильтр выбросил пирамиду");
+        assert_eq!(tex.levels.len(), levels, "фильтр выбросил пирамиду");
 
         let tex = tex.with_filter(Magnify::Linear, Minify::Mipmapped);
-        assert_eq!(tex.mip_levels(), levels, "фильтр перестроил пирамиду");
+        assert_eq!(tex.levels.len(), levels, "фильтр перестроил пирамиду");
     }
 
     #[test]
@@ -1005,7 +1009,7 @@ mod tests {
             .with_filter(Magnify::Linear, Minify::Mipmapped)
             .with_mipmaps();
 
-        assert_eq!(first.mip_levels(), second.mip_levels());
+        assert_eq!(first.levels.len(), second.levels.len());
         assert_same(
             first.sample_grad(uv, squeezed, Vec2::ZERO),
             second.sample_grad(uv, squeezed, Vec2::ZERO),
