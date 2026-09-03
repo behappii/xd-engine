@@ -6,7 +6,7 @@ use xd_engine::{
     texture::{Magnify, Minify, Texture},
 };
 
-use crate::harness::{HEIGHT, WIDTH, World, face_colors, render, tilted_cube};
+use crate::harness::{HEIGHT, WIDTH, World, face_colors, render, render_at, tilted_cube};
 
 /// Шахматка 2×2 клетки: белая и красная.
 ///
@@ -146,6 +146,15 @@ fn colour_switches_in_row(frame: &[u8], y: u32) -> usize {
 
 /// Пол с мелкой плиткой, уходящий к горизонту, и камера низко над ним
 fn horizon_floor(magnify: Magnify, minify: Minify) -> Vec<u8> {
+    horizon_floor_at(magnify, minify, WIDTH, HEIGHT)
+}
+
+/// Тот же пол в буфер произвольного размера.
+///
+/// Размер вынесен параметром ради эталона: та же самая сцена, отрисованная
+/// в разы крупнее, — единственный способ узнать, как кадр должен выглядеть
+/// НА САМОМ ДЕЛЕ, не повторяя при этом логику ни одного из фильтров
+fn horizon_floor_at(magnify: Magnify, minify: Minify, width: u32, height: u32) -> Vec<u8> {
     let mut world = World::new();
 
     // Плитка мелкая: UV домножается на 40, значит на полу 40x40 копий
@@ -170,7 +179,7 @@ fn horizon_floor(magnify: Magnify, minify: Minify) -> Vec<u8> {
     world.scene.camera_position = Vec3::new(0.0, -0.6, 0.0);
     world.scene.pitch = -2.0;
 
-    render(&world)
+    render_at(&world, width, height)
 }
 
 /// Полная вариация строки: сумма модулей скачков яркости между соседями.
@@ -261,4 +270,175 @@ fn mipmaps_calm_down_the_floor_at_the_horizon() {
         tv(&sharp, near),
         "вблизи разошлись с резким"
     );
+}
+
+/// Во сколько раз эталон подробнее кадра по каждой оси. 8 даёт 64 точечные
+/// выборки на пиксель — этого хватает, чтобы шум усреднения не мешал сравнению
+const SUPERSAMPLE: u32 = 8;
+
+/// Как кадр выглядит НА САМОМ ДЕЛЕ.
+///
+/// Та же сцена, отрисованная в 8 раз крупнее по каждой оси ближайшим соседом
+/// и усреднённая обратно: 64 точечные выборки на пиксель. Это и есть та
+/// величина, которую любая фильтрация приближает, — средний цвет текстуры
+/// по площади, накрытой пикселем.
+///
+/// Ради этого эталона стоило вынести размер кадра параметром. Сравнивать
+/// фильтры друг с другом можно бесконечно и ничего при этом не узнать: у теста
+/// мип-уровней порог «лучше ближайшего соседа» проходила и простая билинейка.
+/// А расстояние до истины — величина, посчитанная НЕЗАВИСИМО от всех фильтров
+/// сразу, и по ней сравнение получается осмысленным: ближе или дальше
+fn supersampled_floor() -> Vec<u8> {
+    let big = horizon_floor_at(
+        Magnify::Nearest,
+        Minify::Nearest,
+        WIDTH * SUPERSAMPLE,
+        HEIGHT * SUPERSAMPLE,
+    );
+
+    let mut frame = vec![0u8; (WIDTH * HEIGHT * 4) as usize];
+
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let mut sum = [0u32; 4];
+
+            for sub_y in 0..SUPERSAMPLE {
+                for sub_x in 0..SUPERSAMPLE {
+                    let row = y * SUPERSAMPLE + sub_y;
+                    let column = x * SUPERSAMPLE + sub_x;
+                    let at = ((row * WIDTH * SUPERSAMPLE + column) * 4) as usize;
+
+                    for channel in 0..4 {
+                        sum[channel] += big[at + channel] as u32;
+                    }
+                }
+            }
+
+            let at = ((y * WIDTH + x) * 4) as usize;
+            for channel in 0..4 {
+                frame[at + channel] = (sum[channel] / (SUPERSAMPLE * SUPERSAMPLE)) as u8;
+            }
+        }
+    }
+
+    frame
+}
+
+/// Насколько строка кадра разошлась с эталоном: средний модуль разницы
+/// по яркости.
+///
+/// Считаются только пиксели, целиком закрытые полом в обоих кадрах. У самого
+/// горизонта эталон захватывает и небо — сглаживает КРАЙ геометрии, чего не
+/// делает ни один из сравниваемых кадров, — и такие пиксели мерили бы совсем
+/// не фильтрацию
+fn error_against(reference: &[u8], frame: &[u8], y: u32) -> f32 {
+    let start = (y * WIDTH * 4) as usize;
+    let row = &frame[start..start + (WIDTH * 4) as usize];
+    let truth = &reference[start..start + (WIDTH * 4) as usize];
+
+    let floor = row
+        .chunks_exact(4)
+        .zip(truth.chunks_exact(4))
+        .filter(|(pixel, expected)| pixel[3] == 255 && expected[3] == 255);
+
+    let (count, sum) = floor.fold((0u32, 0u32), |(count, sum), (pixel, expected)| {
+        (count + 1, sum + pixel[0].abs_diff(expected[0]) as u32)
+    });
+
+    assert!(count > 0, "в строке {y} нет пикселей пола");
+
+    sum as f32 / count as f32
+}
+
+#[test]
+fn anisotropy_brings_the_slanted_floor_closer_to_the_truth() {
+    // Мип-уровни спокойны, но заодно и слепы: уровень у них один на обе стороны
+    // отпечатка и берётся по ХУДШЕЙ, иначе вдоль неё останется рябь. А отпечаток
+    // на полу под скользящим углом вытянут в десятки раз, и поперёк картинку
+    // размывает во столько же. Анизотропия берёт уровень по короткой стороне,
+    // а длинную набирает несколькими выборками — то есть усредняет там, где
+    // усреднять надо, и не трогает там, где не надо.
+    //
+    // Мерить это полной вариацией, как мерился алиасинг, НЕЛЬЗЯ: вернувшаяся
+    // резкость поднимает вариацию ровно так же, как её поднимала бы рябь, и
+    // отличить одно от другого этой мерой нельзя в принципе. Поэтому меряем
+    // расстояние до эталона — до кадра с 64 выборками на пиксель. Размытие от
+    // него уводит, рябь уводит тоже, а приближает только правильный ответ.
+    let reference = supersampled_floor();
+
+    let error =
+        |minify| error_against(&reference, &horizon_floor(Magnify::Linear, minify), GRAZING);
+
+    let sharp = error_against(
+        &reference,
+        &horizon_floor(Magnify::Nearest, Minify::Nearest),
+        GRAZING,
+    );
+    let mipmapped = error(Minify::Mipmapped);
+    let four = error(Minify::Anisotropic { max_samples: 4 });
+    let sixteen = error(Minify::Anisotropic { max_samples: 16 });
+
+    // Опора: точечная выборка мимо истины дальше всех — иначе эталон измерял бы
+    // не то, и все остальные сравнения ничего не стоили бы. Замер: 74.8 против
+    // 34.6 у мип-уровней
+    assert!(
+        mipmapped < sharp,
+        "эталон не отличает точечную выборку от фильтрованной: {sharp} против {mipmapped}"
+    );
+
+    // Главное утверждение: анизотропия ВДВОЕ ближе к истине, чем мип-уровни.
+    // Замер по строке 74: 34.6 -> 12.7
+    assert!(
+        sixteen * 2.0 < mipmapped,
+        "анизотропия не приблизила картинку к истине: {sixteen} против {mipmapped}"
+    );
+
+    // И приближает её именно потолок выборок, а не что-то ещё: 34.6 -> 21.4 ->
+    // 12.7. Монотонность важна сама по себе — она показывает, что выборки
+    // действительно раскладываются по длинной стороне. Фильтр, который просто
+    // берёт уровень порезче, дал бы одно и то же число при любом потолке
+    assert!(
+        sixteen < four && four < mipmapped,
+        "ошибка не падает с ростом потолка выборок: {mipmapped} -> {four} -> {sixteen}"
+    );
+}
+
+/// Строка, где пол виден под скользящим углом: отпечаток пикселя вытянут в
+/// десятки раз, и разница между фильтрами наибольшая. Та же строка, на которой
+/// стоит тест мип-уровней
+const GRAZING: u32 = HEIGHT / 2 - 1;
+
+#[test]
+fn anisotropy_only_touches_the_grazing_band() {
+    // Вторая половина: анизотропия обязана быть платой ТОЛЬКО за скользящий
+    // угол. Замерено — расходится с мип-уровнями ровно в строках 72..=81, узкой
+    // полосе у горизонта, а весь ближний план ниже совпадает бит в бит.
+    //
+    // Ближний план нетронут по простой причине, и её стоит назвать вслух, чтобы
+    // не принять этот тест за большее, чем он есть: там картинка РАСТЯНУТА, и
+    // выборка уходит в ветку растяжения раньше, чем доберётся до анизотропии.
+    // То есть тест сторожит границу между ветками, а не вырождение отношения
+    // в единицу.
+    //
+    // Само вырождение кадром не проверить вовсе — пробовал. Лишние выборки на
+    // квадратном отпечатке дают тот же самый байт: уровень-то выбран верно, а
+    // на нём отпечаток и так в тексель. Ошибка настоящая — это лишняя работа
+    // по всему кадру, — но невидимая, поэтому её сторожат юнит-тесты
+    // `a_square_footprint_gives_plain_mipmapping` и
+    // `what_the_samples_cannot_cover_is_blurred_away`, где текстура нарочно
+    // подобрана так, чтобы любой сдвиг выборки был виден по цвету
+    let mipmapped = horizon_floor(Magnify::Linear, Minify::Mipmapped);
+    let anisotropic = horizon_floor(Magnify::Linear, Minify::Anisotropic { max_samples: 16 });
+
+    let near = HEIGHT / 2 + 10;
+    let from = (near * WIDTH * 4) as usize;
+
+    assert_eq!(
+        &mipmapped[from..],
+        &anisotropic[from..],
+        "анизотропия тронула ближний план, где картинка и так растянута"
+    );
+
+    // А у горизонта — обязана разойтись, иначе она просто не работает
+    assert_ne!(mipmapped, anisotropic);
 }
