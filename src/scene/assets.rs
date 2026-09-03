@@ -191,7 +191,7 @@ impl Assets {
     /// чистой настройкой, а память выделяется один раз, на входе в движок, где
     /// намерение уже известно целиком
     pub fn add_texture(&mut self, texture: Texture) -> TextureId {
-        let texture = if texture.minify() == Minify::Mipmapped {
+        let texture = if texture.minify().wants_mipmaps() {
             texture.with_mipmaps()
         } else {
             // Пирамида нужна не всем: у текстуры без сжатия — отладочной
@@ -413,6 +413,18 @@ mod tests {
         assert!(
             assets.texture(mipped).has_mipmaps(),
             "текстура просила мип-уровни и не получила их"
+        );
+
+        // Просящих двое: анизотропная фильтрация — это те же уровни, только
+        // читаемые несколько раз со сдвигом. Ловушка тут ровно та же, и
+        // проглядеть её ещё проще: слово «мип» в названии настройки не звучит
+        let aniso = assets.add_texture(
+            checker().with_filter(Magnify::Nearest, Minify::Anisotropic { max_samples: 8 }),
+        );
+
+        assert!(
+            assets.texture(aniso).has_mipmaps(),
+            "анизотропии нужна пирамида не меньше, чем мип-уровням"
         );
     }
 

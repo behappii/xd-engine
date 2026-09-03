@@ -131,10 +131,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // сосед берёт из пачки случайный, и при движении камеры дальняя плитка
     // закипает.
     //
-    // Одной настройкой это не выразить: пришлось бы выбирать, где мириться
-    let checker = app
-        .assets
-        .add_texture(checker_image.with_filter(Magnify::Nearest, Minify::Mipmapped));
+    // Одной настройкой это не выразить: пришлось бы выбирать, где мириться.
+    //
+    // Анизотропия здесь не для галочки: пол — единственный объект сцены,
+    // который видно под скользящим углом, а именно там мип-уровни и мажут.
+    // Отпечаток пикселя на уходящей плитке вытянут в десятки раз, уровень же
+    // берётся по худшей стороне — значит поперёк взгляда картинку размывает
+    // во столько же раз зря. Разницу видно сразу: плитка остаётся читаемой
+    // заметно дальше. Платится за это временем, ×8 стоит примерно +60% кадра
+    let checker = app.assets.add_texture(
+        checker_image.with_filter(Magnify::Nearest, Minify::Anisotropic { max_samples: 8 }),
+    );
 
     // Куб с текстурой. Развёртка `create_cube` отдаёт каждой грани весь
     // квадрат картинки, так что она ложится на грань целиком.
@@ -231,18 +238,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Проверяем зажатые клавиши через метод .contains() хэш-карты
         if pressed_keys.contains(&KeyCode::KeyW) {
-            scene.camera_position = Vec3 {
-                x: scene.camera_position.x + forward.x * movement_speed,
-                y: scene.camera_position.y,
-                z: scene.camera_position.z + forward.z * movement_speed,
-            };
+            scene.camera_position = scene.camera_position + forward * movement_speed;
         }
         if pressed_keys.contains(&KeyCode::KeyS) {
-            scene.camera_position = Vec3 {
-                x: scene.camera_position.x - forward.x * movement_speed,
-                y: scene.camera_position.y,
-                z: scene.camera_position.z - forward.z * movement_speed,
-            };
+            scene.camera_position = scene.camera_position - forward * movement_speed;
         }
         if pressed_keys.contains(&KeyCode::KeyA) {
             scene.camera_position = scene.camera_position - right * movement_speed;
