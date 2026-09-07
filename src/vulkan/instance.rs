@@ -15,10 +15,39 @@ use std::os::raw::c_char;
 /// слой роняет `vkCreateInstance` целиком, а без слоя жить можно
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
+/// Расширение, без которого Vulkan Loader НЕ ПОКАЖЕТ MoltenVK.
+///
+/// Loader делит драйверы на полноценные и «портируемые» (`portability`) —
+/// вторые не проходят conformance целиком, потому что транслируют Vulkan во
+/// что-то другое; MoltenVK, транслирующий в Metal, именно такой. По
+/// умолчанию loader их скрывает: приложение, написанное под настоящий
+/// Vulkan, не должно молча получить неполную реализацию и сломаться где-то
+/// в середине. Хочешь такую — скажи это явно, вот этим расширением плюс
+/// флагом `ENUMERATE_PORTABILITY_BIT`.
+///
+/// Отсюда обманчивый симптом, если забыть: `vkCreateInstance` проходит
+/// успешно, а `vkEnumeratePhysicalDevices` возвращает НОЛЬ устройств —
+/// как будто на машине нет видеокарты, хотя на самом деле её просто не
+/// показали.
+///
+/// **Включается только если реально предложено, и это не перестраховка.**
+/// Расширение — со стороны LOADER'а, и при работе напрямую с
+/// `libMoltenVK.dylib` мимо loader'а его нет: ПРОВЕРЕНО на этой машине —
+/// `vkEnumerateInstanceExtensionProperties` его не возвращает, сообщение о
+/// включении не печатается. А попросить отсутствующее расширение — это
+/// `VK_ERROR_EXTENSION_NOT_PRESENT` и полный отказ создать instance. То есть
+/// жёстко зашитое требование чинило бы путь через loader, ломая прямой путь,
+/// который сейчас единственный рабочий, — поэтому сначала спрашиваем список
+const PORTABILITY_ENUMERATION_EXTENSION: &CStr = c"VK_KHR_portability_enumeration";
+
 type PfnCreateInstance =
     unsafe extern "system" fn(*const VkInstanceCreateInfo, *const c_void, *mut VkInstance) -> VkEnum;
 type PfnEnumerateInstanceLayerProperties =
     unsafe extern "system" fn(*mut u32, *mut VkLayerProperties) -> VkEnum;
+type PfnEnumerateInstanceExtensionProperties =
+    unsafe extern "system" fn(*const c_char, *mut u32, *mut VkExtensionProperties) -> VkEnum;
+pub type PfnEnumerateDeviceExtensionProperties =
+    unsafe extern "system" fn(VkPhysicalDevice, *const c_char, *mut u32, *mut VkExtensionProperties) -> VkEnum;
 type PfnDestroyInstance = unsafe extern "system" fn(VkInstance, *const c_void);
 type PfnEnumeratePhysicalDevices =
     unsafe extern "system" fn(VkInstance, *mut u32, *mut VkPhysicalDevice) -> VkEnum;
@@ -56,6 +85,7 @@ pub struct InstanceFns {
     pub get_device_proc_addr: PfnGetDeviceProcAddr,
     pub destroy_surface_khr: PfnDestroySurfaceKHR,
     pub get_physical_device_memory_properties: PfnGetPhysicalDeviceMemoryProperties,
+    pub enumerate_device_extension_properties: PfnEnumerateDeviceExtensionProperties,
 }
 
 pub struct Instance {
@@ -75,6 +105,15 @@ impl Instance {
             VkInstance::NULL,
             "vkEnumerateInstanceLayerProperties",
             PfnEnumerateInstanceLayerProperties
+        );
+        // Обе «спросить, что вообще есть» функции — уровня ГЛОБАЛЬНОГО, а не
+        // instance: их и достают с `VkInstance::NULL`, потому что спрашивать
+        // надо ДО создания instance — от ответа зависит, с чем его создавать
+        let enumerate_extensions: PfnEnumerateInstanceExtensionProperties = vk_load!(
+            lib,
+            VkInstance::NULL,
+            "vkEnumerateInstanceExtensionProperties",
+            PfnEnumerateInstanceExtensionProperties
         );
 
         let app_name_c = CString::new(app_name).unwrap();
@@ -99,13 +138,29 @@ impl Instance {
             );
         }
 
-        let extensions: Vec<*const std::os::raw::c_char> =
-            required_extensions.iter().map(|e| e.as_ptr()).collect();
+        let mut extensions: Vec<*const c_char> = required_extensions.iter().map(|e| e.as_ptr()).collect();
+
+        // Portability — только если предложено (подробности у самой
+        // константы). Флаг и расширение идут строго ПАРОЙ: расширение без
+        // флага ничего не включает, флаг без расширения — недопустимое
+        // значение `flags`. Поэтому одна проверка на оба
+        let portability = extension_available(enumerate_extensions, PORTABILITY_ENUMERATION_EXTENSION);
+        let flags = if portability {
+            extensions.push(PORTABILITY_ENUMERATION_EXTENSION.as_ptr());
+            // Печатаем, потому что от этого зависит, ЧЕРЕЗ ЧТО мы вообще
+            // работаем, а по картинке на экране разницы не видно никакой:
+            // расширение предлагает loader, значит он в системе есть, и
+            // MoltenVK мы видим через него, а не напрямую
+            eprintln!("Vulkan: включено {PORTABILITY_ENUMERATION_EXTENSION:?} — работаем через Vulkan Loader");
+            VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+        } else {
+            0
+        };
 
         let create_info = VkInstanceCreateInfo {
             s_type: VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
             p_next: std::ptr::null(),
-            flags: 0,
+            flags,
             p_application_info: &app_info,
             enabled_layer_count: layers.len() as u32,
             pp_enabled_layer_names: layers.as_ptr(),
@@ -215,7 +270,39 @@ fn load_instance_fns(
             "vkGetPhysicalDeviceMemoryProperties",
             PfnGetPhysicalDeviceMemoryProperties
         ),
+        enumerate_device_extension_properties: vk_load!(
+            lib,
+            handle,
+            "vkEnumerateDeviceExtensionProperties",
+            PfnEnumerateDeviceExtensionProperties
+        ),
     })
+}
+
+/// Есть ли расширение среди тех, что реализация вообще предлагает.
+///
+/// Тот же двухходовый вызов, что и у слоёв (сначала «сколько», потом «дай»),
+/// и та же причина спрашивать, а не полагаться на удачу: попросить
+/// отсутствующее расширение — не «оно просто не включится», а
+/// `VK_ERROR_EXTENSION_NOT_PRESENT` и полный отказ создать instance.
+///
+/// `p_layer_name = NULL` значит «расширения самой реализации», а не
+/// добавленные каким-то слоем — нам нужны именно они
+fn extension_available(enumerate: PfnEnumerateInstanceExtensionProperties, wanted: &CStr) -> bool {
+    let mut count = 0u32;
+    unsafe {
+        enumerate(std::ptr::null(), &mut count, std::ptr::null_mut());
+    }
+    if count == 0 {
+        return false;
+    }
+
+    let mut extensions = vec![VkExtensionProperties { extension_name: [0; 256], spec_version: 0 }; count as usize];
+    unsafe {
+        enumerate(std::ptr::null(), &mut count, extensions.as_mut_ptr());
+    }
+
+    extensions.iter().any(|ext| unsafe { CStr::from_ptr(ext.extension_name.as_ptr()) } == wanted)
 }
 
 /// Проверяет, стоит ли на машине слой валидации, не полагаясь на удачу:

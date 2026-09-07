@@ -274,6 +274,22 @@ pub struct VkLayerProperties {
     pub description: [c_char; 256],
 }
 
+/// Одно расширение из списка `vkEnumerateInstanceExtensionProperties` или
+/// `vkEnumerateDeviceExtensionProperties`. Имя — фиксированный массив байт с
+/// нулём внутри, а не указатель: список отдаётся сразу целиком, и владеть
+/// строками отдельно Vulkan не хочет
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct VkExtensionProperties {
+    pub extension_name: [c_char; 256],
+    pub spec_version: u32,
+}
+
+/// Флаг `VkInstanceCreateInfo::flags`: «перечисляй и НЕполноценные
+/// реализации Vulkan». Без него Vulkan Loader делает вид, что таких
+/// драйверов нет вовсе, — а MoltenVK ровно такой (см. `Instance::new`)
+pub const VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR: VkFlags = 0x0000_0001;
+
 // ============================================================================
 // Physical device / очереди
 // ============================================================================
