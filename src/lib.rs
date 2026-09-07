@@ -33,3 +33,6 @@ pub mod math;
 pub mod renderer;
 pub mod scene;
 pub mod texture;
+/// Второй рендер-бэкенд — голый Vulkan, рядом с CPU-растеризатором, а не
+/// вместо него. Подробности — в doc-комментарии модуля
+pub mod vulkan;
