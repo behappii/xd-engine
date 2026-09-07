@@ -252,7 +252,26 @@ impl Device {
         };
 
         let swapchain_ext = c"VK_KHR_swapchain";
-        let extensions = [swapchain_ext.as_ptr()];
+        let mut extensions = vec![swapchain_ext.as_ptr()];
+
+        // Вторая половина той же истории про портируемость, что в
+        // `instance.rs`. Там расширение разрешало УВИДЕТЬ неполноценную
+        // реализацию, здесь — обязанность признать, что видим именно её:
+        // спецификация требует, чтобы устройство, объявляющее
+        // `VK_KHR_portability_subset`, создавалось только с явно включённым
+        // этим расширением. Смысл тот же, что у флага у instance: молчаливое
+        // согласие работать с урезанным Vulkan должно быть сказано вслух, а
+        // не подразумеваться.
+        //
+        // Проверка обязательна в обе стороны, и это не перестраховка.
+        // Не включить, когда устройство его объявляет, — нарушение
+        // спецификации (слой валидации скажет об этом прямо). Включить,
+        // когда не объявляет, — `VK_ERROR_EXTENSION_NOT_PRESENT` и отказ
+        // создать устройство. Верного варианта «всегда» тут просто нет
+        let portability_subset = c"VK_KHR_portability_subset";
+        if device_extension_available(instance, physical, portability_subset) {
+            extensions.push(portability_subset.as_ptr());
+        }
 
         let create_info = VkDeviceCreateInfo {
             s_type: VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -634,6 +653,38 @@ fn load_device_fns(
         ),
         queue_wait_idle: vk_load_device!(get_device_proc_addr, handle, "vkQueueWaitIdle", PfnQueueWaitIdle),
     })
+}
+
+/// Объявляет ли КОНКРЕТНОЕ физическое устройство такое расширение.
+///
+/// Отдельно от `extension_available` в `instance.rs`: там спрашивается
+/// реализация целиком и до создания instance, здесь — уже выбранная
+/// видеокарта. Списки эти разные и пересекаться не обязаны
+fn device_extension_available(instance: &Instance, physical: VkPhysicalDevice, wanted: &std::ffi::CStr) -> bool {
+    let mut count = 0u32;
+    unsafe {
+        (instance.fns.enumerate_device_extension_properties)(
+            physical,
+            std::ptr::null(),
+            &mut count,
+            std::ptr::null_mut(),
+        );
+    }
+    if count == 0 {
+        return false;
+    }
+
+    let mut extensions = vec![VkExtensionProperties { extension_name: [0; 256], spec_version: 0 }; count as usize];
+    unsafe {
+        (instance.fns.enumerate_device_extension_properties)(
+            physical,
+            std::ptr::null(),
+            &mut count,
+            extensions.as_mut_ptr(),
+        );
+    }
+
+    extensions.iter().any(|ext| unsafe { std::ffi::CStr::from_ptr(ext.extension_name.as_ptr()) } == wanted)
 }
 
 /// Перебирает физические устройства и берёт первое, у которого нашлось
