@@ -7,11 +7,10 @@
 //! понятнее, чем неявный порядок полей структуры — тот же выбор, что уже
 //! объяснён у `Swapchain::destroy` и `FrameSync::destroy`.
 //!
-//! **Известный пробел Фазы 1**: изменение размера окна не пересобирает
-//! swapchain — `vkAcquireNextImageKHR`/`vkQueuePresentKHR` вернут
-//! `VK_ERROR_OUT_OF_DATE_KHR`, и `draw_frame` отдаст это как ошибку.
-//! Пересборка swapchain на resize — материал для одной из следующих фаз,
-//! не для «hello triangle»
+//! Изменение размера окна свопчейн пересобирает — двумя независимыми
+//! путями сразу: явным `resize` из события окна и кодами
+//! `OUT_OF_DATE`/`SUBOPTIMAL` от самого драйвера. Свёрнутое окно при этом
+//! не ошибка, а пропущенный кадр (см. `ensure_swapchain`)
 
 use crate::config::{DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR};
 use crate::math::Mat4;
@@ -58,12 +57,15 @@ pub struct VulkanRenderer {
     swapchain: Swapchain,
     // Один буфер на всё время жизни рендерера, не на кадр в полёте — см.
     // doc-комментарий `depth::DepthBuffer` (кадр в полёте всего один).
-    // Живёт рядом со swapchain, потому что размером обязан следовать за
-    // ним же (оба пересчитываются вместе при изменении размера окна —
-    // впрочем, пересборки на resize в этом примере всё ещё нет, см.
-    // «Известный пробел Фазы 1»)
+    // Живёт рядом со swapchain, потому что размером обязан следовать за ним
+    // же: оба пересобираются вместе при изменении размера окна (см.
+    // `ensure_swapchain`)
     depth: DepthBuffer,
     render_pass: VkRenderPass,
+    // Формат, под который собран render pass. Хранится, чтобы при пересборке
+    // свопчейна заметить, если поверхность вдруг предложит другой — см.
+    // `ensure_swapchain`
+    render_pass_format: VkEnum,
     // Layout создаётся ДО пайплайна (тот на него ссылается в
     // `VkPipelineLayoutCreateInfo`), а настоящие картинка/сэмплер/набор —
     // ПОСЛЕ него, когда есть что в набор записать. Оба поля переживают
@@ -84,6 +86,15 @@ pub struct VulkanRenderer {
     // них подходящий тип памяти. Запрашиваются один раз — у физического
     // устройства они не меняются
     memory_properties: VkPhysicalDeviceMemoryProperties,
+    // Последний известный размер окна В ФИЗИЧЕСКИХ пикселях. Нужен как
+    // запасной вариант: обычно размер поверхности диктует сама поверхность
+    // (`choose_extent`), но когда она отвечает `u32::MAX` — «решай сам», —
+    // взять его больше неоткуда
+    window_size: (u32, u32),
+    // Свопчейн разошёлся с окном и требует пересборки. Флагом, а не действием
+    // на месте: событие об изменении размера прилетает вне кадра, а трогать
+    // свопчейн, пока GPU рисует, нельзя
+    needs_recreate: bool,
     // Последние три — и строго в этом порядке. Причина в комментарии над
     // структурой; трогать их местами нельзя, это не стиль
     device: Device,
@@ -166,6 +177,7 @@ impl VulkanRenderer {
             instance,
             surface,
             device,
+            render_pass_format: swapchain.format,
             swapchain,
             depth,
             render_pass,
@@ -177,6 +189,8 @@ impl VulkanRenderer {
             sync,
             gpu_assets,
             memory_properties,
+            window_size: (size.width, size.height),
+            needs_recreate: false,
         })
     }
 
@@ -197,11 +211,17 @@ impl VulkanRenderer {
         // только когда игра и правда завела новый меш или текстуру
         self.gpu_assets.sync(&self.device, &self.memory_properties, self.command_pool, assets)?;
 
+        // Свёрнутое окно — не ошибка и не повод пересобирать: рисовать
+        // некуда, свопчейна нулевого размера не бывает. Просто пропускаем
+        // кадр и пробуем снова на следующем
+        if !self.ensure_swapchain()? {
+            return Ok(());
+        }
+
         let d = &self.device;
 
         unsafe {
             (d.fns.wait_for_fences)(d.handle, 1, &self.sync.in_flight, VK_TRUE, u64::MAX);
-            (d.fns.reset_fences)(d.handle, 1, &self.sync.in_flight);
         }
 
         let mut image_index = 0u32;
@@ -215,13 +235,35 @@ impl VulkanRenderer {
                 &mut image_index,
             )
         };
+        // `OUT_OF_DATE` — свопчейн больше не годится для поверхности (окно
+        // изменили). Не ошибка, а штатный ответ: пересобираем и пропускаем
+        // кадр, следующий пойдёт уже по новому свопчейну.
+        //
+        // **Fence сбрасывается ПОСЛЕ этой проверки, а не до неё, и порядок
+        // тут критичен.** Ранний выход отсюда с уже сброшенным fence оставил
+        // бы его несигналимым навсегда: `vkQueueSubmit` в этом кадре не
+        // случится, значит сигналить его некому, а следующий кадр начнётся с
+        // `vkWaitForFences` и повиснет на нём. Классический тупик, и заметьте
+        // — тупик БЕЗ единого сообщения от слоя валидации: с точки зрения
+        // Vulkan мы просто ждём.
+        //
+        // Замерено, что на этой машине сюда не попадает вовсе: MoltenVK
+        // изменение размера окна кодом не сообщает ни здесь, ни при показе —
+        // всю работу делает явный `resize` из события окна. То есть эта ветка
+        // здесь не «основной путь, который вот-вот сломается», а страховка
+        // для платформ, где драйвер сообщает сам (обычно Windows/Linux).
+        // Проверить её на этой машине нечем, поэтому порядок и объяснён
+        // подробно: сломать его тут можно совершенно безнаказанно
+        if acquire_result == VK_ERROR_OUT_OF_DATE_KHR {
+            self.needs_recreate = true;
+            return Ok(());
+        }
         if acquire_result != VK_SUCCESS && acquire_result != VK_SUBOPTIMAL_KHR {
-            return Err(format!(
-                "vkAcquireNextImageKHR вернул {acquire_result} — пересборка swapchain на resize не реализована в Фазе 1"
-            ));
+            return Err(format!("vkAcquireNextImageKHR вернул {acquire_result}"));
         }
 
         unsafe {
+            (d.fns.reset_fences)(d.handle, 1, &self.sync.in_flight);
             (d.fns.reset_command_buffer)(self.command_buffer, 0);
         }
         self.record_command_buffer(image_index, scene)?;
@@ -261,11 +303,105 @@ impl VulkanRenderer {
             p_results: std::ptr::null_mut(),
         };
         let result = unsafe { (d.fns.queue_present_khr)(d.queue, &present_info) };
-        if result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR {
+        // `SUBOPTIMAL` здесь, в отличие от получения картинки, тоже повод
+        // пересобрать: картинка показана и кадр не потерян, но поверхность
+        // уже другая, и дальше будет только хуже
+        if result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR {
+            self.needs_recreate = true;
+            return Ok(());
+        }
+        if result != VK_SUCCESS {
             return Err(format!("vkQueuePresentKHR вернул {result}"));
         }
 
         Ok(())
+    }
+
+    /// Сообщить о новом размере окна — звать из `WindowEvent::Resized`.
+    ///
+    /// Размер В ФИЗИЧЕСКИХ пикселях (`window.inner_size()`), не в логических:
+    /// поверхность вывода всегда физическая (CLAUDE.md, «Размер кадра — не
+    /// константа»).
+    ///
+    /// Событие окна — не единственный источник правды: драйвер сообщает о
+    /// рассогласовании и сам, кодами `OUT_OF_DATE`/`SUBOPTIMAL` в `draw`.
+    /// Держать оба пути стоит, и не для симметрии: на этой машине (MoltenVK)
+    /// замерено, что коды драйвера не приходят ВООБЩЕ и работает только
+    /// событие — а на платформах, где окно меняет размер мимо winit
+    /// (полноэкранный переход, смена монитора, композитор Wayland), бывает
+    /// ровно наоборот
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.window_size = (width, height);
+        self.needs_recreate = true;
+    }
+
+    /// Привести свопчейн в соответствие с окном, если они разошлись.
+    ///
+    /// Возвращает `false`, если рисовать сейчас нельзя вовсе — окно свёрнуто
+    /// или схлопнуто в ноль по одной из сторон. Свопчейна нулевого размера
+    /// не бывает, а падать из-за свёрнутого окна незачем: флаг остаётся
+    /// взведённым, и попытка повторится на следующем кадре, когда окно
+    /// вернут. Ровно та же ситуация, что у CPU-пути в `frame_size`
+    fn ensure_swapchain(&mut self) -> Result<bool, String> {
+        if !self.needs_recreate {
+            return Ok(true);
+        }
+        if self.window_size.0 == 0 || self.window_size.1 == 0 {
+            return Ok(false);
+        }
+
+        let d = &self.device;
+        unsafe {
+            // Ждём GPU целиком: свопчейн, его картинки и framebuffer'ы прямо
+            // сейчас могут быть заняты кадром, который ещё выполняется.
+            // Дорого, но случается только на изменении размера, а не в кадре
+            (d.fns.device_wait_idle)(d.handle);
+
+            // Порядок обратный созданию: framebuffer'ы держат image view — и
+            // цветной, и глубины, — поэтому уходят первыми
+            for &framebuffer in &self.framebuffers {
+                (d.fns.destroy_framebuffer)(d.handle, framebuffer, std::ptr::null());
+            }
+        }
+        self.framebuffers.clear();
+        self.depth.destroy(d);
+        self.swapchain.destroy(d);
+
+        // `old_swapchain` при создании передаётся NULL, потому что старый уже
+        // уничтожен. Передать его вместо этого живым дало бы драйверу шанс
+        // переиспользовать ресурсы и показать последний кадр без чёрного
+        // промежутка — но и усложнило бы уборку: старый свопчейн пришлось бы
+        // держать до конца создания нового. На изменении размера окна мигание
+        // никого не смущает
+        self.swapchain = Swapchain::new(&self.instance, &self.device, self.surface, self.window_size)?;
+
+        // Формат поверхности при пересоздании обязан совпасть с прежним:
+        // render pass и пайплайн собраны под него, а пересобирать их здесь
+        // мы не умеем. Смениться он на практике не может (та же поверхность,
+        // то же устройство), но молча рисовать не в тот формат — это
+        // испорченные цвета без единого сообщения, а так будет понятная
+        // ошибка
+        if self.swapchain.format != self.render_pass_format {
+            return Err(format!(
+                "формат поверхности сменился ({} → {}) — пересборка render pass не реализована",
+                self.render_pass_format, self.swapchain.format
+            ));
+        }
+
+        self.depth = DepthBuffer::new(&self.device, &self.memory_properties, self.swapchain.extent)?;
+        self.framebuffers =
+            create_framebuffers(&self.device, self.render_pass, &self.swapchain, self.depth.view)?;
+
+        // Картинок в новом свопчейне может оказаться другое число, а
+        // `render_finished` заведён по одному на картинку (см. `sync.rs`).
+        // Пересобираем только когда счёт и правда изменился: обычно он тот же
+        if self.sync.render_finished.len() != self.swapchain.image_views.len() {
+            self.sync.destroy(&self.device);
+            self.sync = FrameSync::new(&self.device, self.swapchain.image_views.len())?;
+        }
+
+        self.needs_recreate = false;
+        Ok(true)
     }
 
     fn record_command_buffer(&self, image_index: u32, scene: &Scene) -> Result<(), String> {
