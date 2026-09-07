@@ -440,6 +440,34 @@ impl Texture {
         self.minify
     }
 
+    /// Что делать при растяжении. Нужен GPU-пути (`vulkan::sampler`) для
+    /// сборки `VkSamplerCreateInfo` — тот же вопрос, что `minify()` уже
+    /// отдаёт CPU-пути, просто для другой из двух настроек
+    pub(crate) fn magnify(&self) -> Magnify {
+        self.magnify
+    }
+
+    /// Нулевой мип-уровень как плотные байты RGBA — то, что GPU-путь
+    /// (`vulkan::image`) копирует в `VkImage` через `vkCmdCopyBufferToImage`.
+    ///
+    /// Обратное преобразование к `from_rgba8`: тексели здесь снова `Vec3`
+    /// в 0..1, значит домножаем на 255 и округляем, а не обрезаем — обрезание
+    /// систематически тянуло бы яркость вниз. Альфа всегда 255: у текстуры
+    /// её и так нет (см. `from_rgba8` — она отбрасывается при загрузке),
+    /// а не писать байт вообще нельзя — раскладка RGBA фиксирована этим же
+    /// форматом на стороне Vulkan (`VK_FORMAT_R8G8B8A8_UNORM`)
+    pub(crate) fn level0_rgba8(&self) -> Vec<u8> {
+        let level = &self.levels[0];
+        level
+            .texels
+            .iter()
+            .flat_map(|t| {
+                let channel = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+                [channel(t.x), channel(t.y), channel(t.z), 255]
+            })
+            .collect()
+    }
+
     /// Ширина исходной картинки в текселях — та самая, что передавалась
     /// в конструктор. Мип-уровни на неё не влияют
     pub fn width(&self) -> u32 {
