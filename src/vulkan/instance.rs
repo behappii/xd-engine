@@ -40,6 +40,20 @@ const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 /// который сейчас единственный рабочий, — поэтому сначала спрашиваем список
 const PORTABILITY_ENUMERATION_EXTENSION: &CStr = c"VK_KHR_portability_enumeration";
 
+/// Идёт в комплекте с портируемостью, хотя сами мы его ни для чего не зовём.
+///
+/// `VK_KHR_portability_subset`, который включает `device.rs`, объявлен
+/// ЗАВИСЯЩИМ от этого instance-расширения, а спецификация требует, чтобы все
+/// зависимости включаемого расширения были включены тоже. Без него
+/// `vkCreateDevice` — нарушение
+/// `VUID-vkCreateDevice-ppEnabledExtensionNames-01387`.
+///
+/// Найдено не рассуждением, а слоем валидации, который появился вместе с
+/// Vulkan SDK: пока работали напрямую через MoltenVK, ветка портируемости не
+/// выполнялась вовсе, и проверить её было нечем. Ровно тот случай, ради
+/// которого слой и ставили
+const PHYSICAL_DEVICE_PROPERTIES2_EXTENSION: &CStr = c"VK_KHR_get_physical_device_properties2";
+
 type PfnCreateInstance =
     unsafe extern "system" fn(*const VkInstanceCreateInfo, *const c_void, *mut VkInstance) -> VkEnum;
 type PfnEnumerateInstanceLayerProperties =
@@ -140,13 +154,21 @@ impl Instance {
 
         let mut extensions: Vec<*const c_char> = required_extensions.iter().map(|e| e.as_ptr()).collect();
 
-        // Portability — только если предложено (подробности у самой
-        // константы). Флаг и расширение идут строго ПАРОЙ: расширение без
-        // флага ничего не включает, флаг без расширения — недопустимое
-        // значение `flags`. Поэтому одна проверка на оба
-        let portability = extension_available(enumerate_extensions, PORTABILITY_ENUMERATION_EXTENSION);
+        // Portability — только если предложено (подробности у самих
+        // констант). Включается ТРОЙКА, и ни одну часть нельзя опустить:
+        // расширение без флага ничего не включает, флаг без расширения —
+        // недопустимое значение `flags`, а `VK_KHR_portability_subset` у
+        // устройства (`device.rs`) без `get_physical_device_properties2`
+        // здесь — нарушение спецификации. Поэтому и решение одно на всех
+        // троих: если loader предлагает первое, но не второе, портируемость
+        // всё равно не получится довести до устройства, и честнее не
+        // начинать — тогда останется понятная ошибка «не видит ни одного
+        // физического устройства», а не отказ в середине `vkCreateDevice`
+        let portability = extension_available(enumerate_extensions, PORTABILITY_ENUMERATION_EXTENSION)
+            && extension_available(enumerate_extensions, PHYSICAL_DEVICE_PROPERTIES2_EXTENSION);
         let flags = if portability {
             extensions.push(PORTABILITY_ENUMERATION_EXTENSION.as_ptr());
+            extensions.push(PHYSICAL_DEVICE_PROPERTIES2_EXTENSION.as_ptr());
             // Печатаем, потому что от этого зависит, ЧЕРЕЗ ЧТО мы вообще
             // работаем, а по картинке на экране разницы не видно никакой:
             // расширение предлагает loader, значит он в системе есть, и

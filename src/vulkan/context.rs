@@ -41,11 +41,32 @@ struct InstanceLayout {
     spin_degrees_per_second: f32,
 }
 
+// ВНИМАНИЕ: порядок полей здесь — не оформление, а корректность.
+//
+// Rust роняет поля структуры В ПОРЯДКЕ ОБЪЯВЛЕНИЯ, уже ПОСЛЕ того, как
+// отработал ручной `Drop for VulkanRenderer` ниже. Значит три поля с
+// собственными деструкторами — `device`, `instance`, `lib` — обязаны стоять
+// В КОНЦЕ и именно в этом порядке: `vkDestroyDevice` раньше
+// `vkDestroyInstance`, а выгрузка самой библиотеки (`dlclose` в
+// `Library::drop`) — позже обоих, потому что оба зовут функции, КОТОРЫЕ В
+// НЕЙ И ЛЕЖАТ.
+//
+// Раньше они стояли первыми — при том, что комментарий уверял в обратном, —
+// и это давало настоящее падение при штатном закрытии окна:
+//
+//     Exception Type: EXC_BAD_ACCESS (SIGSEGV)
+//     0  ???                0x119050f04 ???      ← адрес вне всех регионов
+//     1  vulkan_triangle    Instance::drop + 36
+//
+// то есть `dlclose` уже выгрузил библиотеку, а `vkDestroyInstance` всё ещё
+// звался по указателю в неё. Долго не замечалось по двум причинам: путь
+// уничтожения виден только при ШТАТНОМ выходе (по Escape или крестику), а
+// прибитый сигналом процесс до `Drop` не доходит вовсе; и напрямую с
+// MoltenVK `dlclose` библиотеку фактически не выгружал, так что указатель
+// случайно оставался рабочим. Сломалось это только с настоящим Vulkan
+// Loader'ом, который выгружается по-честному
 pub struct VulkanRenderer {
-    lib: Library,
-    instance: Instance,
     surface: VkSurfaceKHR,
-    device: Device,
     swapchain: Swapchain,
     // Один буфер на всё время жизни рендерера, не на кадр в полёте — см.
     // doc-комментарий `depth::DepthBuffer` (кадр в полёте всего один).
@@ -83,6 +104,11 @@ pub struct VulkanRenderer {
     // зависеть от прошедшего времени, а не от FPS (тот же принцип, что у
     // `dt` в `EngineApp` на CPU-пути)
     start_time: Instant,
+    // Последние три — и строго в этом порядке. Причина в комментарии над
+    // структурой; трогать их местами нельзя, это не стиль
+    device: Device,
+    instance: Instance,
+    lib: Library,
 }
 
 impl VulkanRenderer {
@@ -143,7 +169,10 @@ impl VulkanRenderer {
         let command_pool = create_command_pool(&device)?;
         let command_buffer = allocate_command_buffer(&device, command_pool)?;
 
-        let sync = FrameSync::new(&device)?;
+        // Столько же семафоров `render_finished`, сколько картинок в
+        // swapchain — см. doc-комментарий `sync.rs`, почему одного общего
+        // не хватает даже при одном кадре в полёте
+        let sync = FrameSync::new(&device, swapchain.image_views.len())?;
 
         // Настоящая геометрия вместо зашитого в шейдер треугольника —
         // ровно то, ради чего затевалась Фаза 2. Куб — тот же
@@ -284,6 +313,13 @@ impl VulkanRenderer {
         }
         self.record_command_buffer(image_index)?;
 
+        // Семафор берётся по номеру ПОЛУЧЕННОЙ картинки, а не один общий:
+        // показ предыдущего кадра мог ещё держать свой (см. doc-комментарий
+        // `sync.rs`). Копия в локальную переменную нужна затем, что и
+        // `vkQueueSubmit`, и `vkQueuePresentKHR` хотят УКАЗАТЕЛЬ на семафор,
+        // а не сам семафор
+        let render_finished = self.sync.render_finished[image_index as usize];
+
         let wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         let submit_info = VkSubmitInfo {
             s_type: VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -294,7 +330,7 @@ impl VulkanRenderer {
             command_buffer_count: 1,
             p_command_buffers: &self.command_buffer,
             signal_semaphore_count: 1,
-            p_signal_semaphores: &self.sync.render_finished,
+            p_signal_semaphores: &render_finished,
         };
         let result = unsafe { (d.fns.queue_submit)(d.queue, 1, &submit_info, self.sync.in_flight) };
         if result != VK_SUCCESS {
@@ -305,7 +341,7 @@ impl VulkanRenderer {
             s_type: VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             p_next: std::ptr::null(),
             wait_semaphore_count: 1,
-            p_wait_semaphores: &self.sync.render_finished,
+            p_wait_semaphores: &render_finished,
             swapchain_count: 1,
             p_swapchains: &self.swapchain.handle,
             p_image_indices: &image_index,
@@ -470,9 +506,13 @@ impl Drop for VulkanRenderer {
             self.swapchain.destroy(d);
             (self.instance.fns.destroy_surface_khr)(self.instance.handle, self.surface, std::ptr::null());
         }
-        // device, instance, lib уничтожатся следом сами — у них есть
-        // собственный `Drop` (см. `device.rs`/`instance.rs`/`loader.rs`),
-        // и порядок полей структуры как раз ставит их последними
+        // `device`, `instance` и `lib` уничтожатся следом сами — у них есть
+        // собственный `Drop` (см. `device.rs`/`instance.rs`/`loader.rs`), и
+        // порядок полей структуры ставит их последними, именно в таком
+        // порядке. Это и есть то самое место, ради которого написан
+        // комментарий над объявлением структуры: раньше здесь стояло то же
+        // утверждение, а поля лежали наоборот, и штатное закрытие окна
+        // валилось с SIGSEGV
     }
 }
 
