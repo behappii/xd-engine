@@ -14,11 +14,14 @@
 //! значит звать Objective-C рантайм напрямую — `objc_msgSend` — тот же
 //! путь, которым устроены сами эти крейты внутри
 
-use crate::vk_load;
 use crate::vulkan::ffi::*;
 use crate::vulkan::instance::Instance;
-use crate::vulkan::loader::Library;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+use crate::vulkan::loader::{Library, vk_load};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
+// Нужен только ветке Xlib — без `cfg` это предупреждение о неиспользуемом
+// импорте на всех остальных платформах
+#[cfg(target_os = "linux")]
+use raw_window_handle::RawDisplayHandle;
 use std::ffi::{CStr, c_void};
 
 /// Платформенное расширение, которое нужно запросить у `Instance::new` ещё
@@ -42,7 +45,14 @@ pub fn platform_extension() -> &'static CStr {
 /// платформенному расширению выше
 pub const SURFACE_EXTENSION: &CStr = c"VK_KHR_surface";
 
-pub fn create<W>(lib: &Library, instance: &Instance, window: &W) -> Result<VkSurfaceKHR, String>
+/// `scale_factor` — отношение физических пикселей к логическим у этого окна
+/// (`winit::window::Window::scale_factor`). Нужен только на Mac и только
+/// затем, чтобы поверхность не оказалась вдвое мельче окна на Retina —
+/// подробности у `attach_metal_layer`. На Windows/Linux размер поверхности
+/// в пикселях спрашивается у оконной системы напрямую, и параметр там не
+/// участвует
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+pub fn create<W>(lib: &Library, instance: &Instance, window: &W, scale_factor: f64) -> Result<VkSurfaceKHR, String>
 where
     W: HasWindowHandle + HasDisplayHandle,
 {
@@ -52,7 +62,7 @@ where
 
     match window_handle.as_raw() {
         #[cfg(target_os = "macos")]
-        RawWindowHandle::AppKit(handle) => create_metal(lib, instance, handle.ns_view.as_ptr()),
+        RawWindowHandle::AppKit(handle) => create_metal(lib, instance, handle.ns_view.as_ptr(), scale_factor),
 
         #[cfg(target_os = "windows")]
         RawWindowHandle::Win32(handle) => create_win32(lib, instance, handle),
@@ -147,15 +157,57 @@ mod objc {
             unsafe { std::mem::transmute(objc_msgSend as *const c_void) };
         unsafe { f(receiver, selector, arg) }
     }
+
+    /// `[receiver sel: CGFloat]`, например `setContentsScale:`. `CGFloat` на
+    /// 64-битных платформах — это `f64`, и объявить аргумент правильно здесь
+    /// важнее, чем в остальных случаях: целые аргументы едут в обычных
+    /// регистрах, а вещественные — в векторных, поэтому ошибка в типе не
+    /// «слегка исказит число», а передаст мусор из совсем другого регистра
+    pub unsafe fn send_f64(receiver: *mut c_void, selector: *mut c_void, arg: f64) -> *mut c_void {
+        let f: unsafe extern "C" fn(*mut c_void, *mut c_void, f64) -> *mut c_void =
+            unsafe { std::mem::transmute(objc_msgSend as *const c_void) };
+        unsafe { f(receiver, selector, arg) }
+    }
 }
 
 /// Заводит `CAMetalLayer` и подставляет его слоем указанному `NSView`.
 ///
 /// `alloc`+`init`, а не удобный конструктор вроде `+layer`: `alloc`
 /// возвращает объект с retain count 1 без пула авторелизов, и владение
-/// сразу понятно — тот же паттерн, каким пользуется любой Objective-C код
+/// сразу понятно — тот же паттерн, каким пользуется любой Objective-C код.
+///
+/// **И эту единицу надо отдать обратно.** В Objective-C нет заимствований,
+/// владение считается вручную: `alloc` даёт нам +1, а `setLayer:` берёт
+/// СВОЙ +1 (`NSView.layer` — strong-свойство), итого 2. Мы дальше слой не
+/// держим — только передаём указатель в `VkMetalSurfaceCreateInfoEXT` и
+/// забываем, — значит свою единицу обязаны вернуть `release`. Без него слой
+/// не освободится никогда: вид отпустит свою ссылку при уничтожении окна, а
+/// наша так и останется. Утечка при этом ровно на один объект за всё время
+/// жизни процесса — потому и не бросалась в глаза.
+///
+/// Отпускаем ПОСЛЕ `setLayer:`, и порядок здесь ровно тот, что делает
+/// операцию безопасной: к моменту `release` сильную ссылку уже держит вид,
+/// так что счётчик падает с 2 до 1, а не с 1 до 0. Сделать наоборот —
+/// отпустить до передачи виду — значит освободить слой прямо себе под
+/// ногами.
+///
+/// **`contentsScale` обязателен, и это не мелочь.** Слой, заведённый руками,
+/// получает `contentsScale = 1.0`, и его `drawableSize` остаётся в
+/// ЛОГИЧЕСКИХ пикселях. Свой слой AppKit за нас не поправит — он обновляет
+/// масштаб только у слоёв, которые вид завёл себе сам. MoltenVK отдаёт
+/// `drawableSize` как `currentExtent` поверхности, `choose_extent` берёт
+/// его как есть (поверхность диктует размер — так и задумано), и на Retina
+/// получается swapchain ровно вдвое мельче окна по каждой оси: картинка
+/// рисуется в 800×600 и растягивается компоновщиком на окно 1600×1200.
+///
+/// Ошибка предельно тихая: ничего не падает, ничего не искажается, просто
+/// кадр мягче, чем должен быть, — а списать это легко на что угодно, от
+/// отсутствия сглаживания до самой шахматки. Замерено пробой: до правки
+/// «окно 1600x1200 физ., swapchain extent 800x600», после — совпадают.
+/// Это тот же самый разрыв между логическими и физическими пикселями, что
+/// уже описан для CPU-пути в CLAUDE.md («Размер кадра — не константа»)
 #[cfg(target_os = "macos")]
-fn attach_metal_layer(ns_view: *mut c_void) -> *mut c_void {
+fn attach_metal_layer(ns_view: *mut c_void, scale_factor: f64) -> *mut c_void {
     use objc::*;
     unsafe {
         let layer_class = class(c"CAMetalLayer");
@@ -167,16 +219,31 @@ fn attach_metal_layer(ns_view: *mut c_void) -> *mut c_void {
         send_bool(ns_view, sel(c"setWantsLayer:"), true);
         send_ptr(ns_view, sel(c"setLayer:"), layer);
 
+        // После подстановки, а не до: так масштаб точно не потеряется, что
+        // бы AppKit ни делал со слоем в момент привязки к виду
+        send_f64(layer, sel(c"setContentsScale:"), scale_factor);
+
+        // Отдаём свой +1 от `alloc`: дальше слоем владеет вид (см.
+        // doc-комментарий). Возвращаемый указатель после этого — заимствование,
+        // а не владение, и живёт он ровно столько же, сколько окно, — то есть
+        // дольше, чем поверхность, которую из него делают
+        send0(layer, sel(c"release"));
+
         layer
     }
 }
 
 #[cfg(target_os = "macos")]
-fn create_metal(lib: &Library, instance: &Instance, ns_view: *mut c_void) -> Result<VkSurfaceKHR, String> {
+fn create_metal(
+    lib: &Library,
+    instance: &Instance,
+    ns_view: *mut c_void,
+    scale_factor: f64,
+) -> Result<VkSurfaceKHR, String> {
     let create_metal_surface_ext: PfnCreateMetalSurfaceEXT =
         vk_load!(lib, instance.handle, "vkCreateMetalSurfaceEXT", PfnCreateMetalSurfaceEXT);
 
-    let layer = attach_metal_layer(ns_view);
+    let layer = attach_metal_layer(ns_view, scale_factor);
 
     let create_info = VkMetalSurfaceCreateInfoEXT {
         s_type: VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,

@@ -92,7 +92,10 @@ impl VulkanRenderer {
         let required_extensions = [surface::SURFACE_EXTENSION, surface::platform_extension()];
         let instance = Instance::new(&lib, "xd_engine vulkan_triangle", &required_extensions)?;
 
-        let surface = surface::create(&lib, &instance, window)?;
+        // `scale_factor` — не косметика: на Retina без него поверхность
+        // выходит вдвое мельче окна по каждой оси (см. `attach_metal_layer`
+        // в `surface.rs`)
+        let surface = surface::create(&lib, &instance, window, window.scale_factor())?;
         let device = Device::new(&instance, surface)?;
 
         let size = window.inner_size();
