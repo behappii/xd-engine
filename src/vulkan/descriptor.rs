@@ -47,80 +47,78 @@ pub fn create_set_layout(device: &Device) -> Result<VkDescriptorSetLayout, Strin
     Ok(set_layout)
 }
 
-/// Пул на один набор (текстур у нас пока одна — Фаза 5 умножит инстансы, не
-/// обязательно наборы: сэмплер на инстанс не завязан) и сам набор,
-/// заполненный ссылкой на конкретные `VkImageView`+`VkSampler`
-pub struct Descriptor {
-    pool: VkDescriptorPool,
-    pub set: VkDescriptorSet,
+/// Пул на `capacity` наборов — по одному на текстуру арены плюс один на
+/// белую заглушку (см. `gpu_assets`).
+///
+/// Размер пула фиксируется при создании и потом не растёт: Vulkan не умеет
+/// «дозанять» у пула сверх объявленного. Поэтому появление новых текстур —
+/// это не досоздание набора, а пересборка пула целиком (`GpuAssets::sync`).
+/// Дёшево, потому что случается на загрузке, а не в кадре
+pub fn create_pool(device: &Device, capacity: u32) -> Result<VkDescriptorPool, String> {
+    let pool_size =
+        VkDescriptorPoolSize { descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptor_count: capacity };
+    let pool_info = VkDescriptorPoolCreateInfo {
+        s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        p_next: std::ptr::null(),
+        flags: 0,
+        max_sets: capacity,
+        pool_size_count: 1,
+        p_pool_sizes: &pool_size,
+    };
+    let mut pool = VkDescriptorPool::NULL;
+    let result =
+        unsafe { (device.fns.create_descriptor_pool)(device.handle, &pool_info, std::ptr::null(), &mut pool) };
+    if result != VK_SUCCESS {
+        return Err(format!("vkCreateDescriptorPool вернул {result}"));
+    }
+    Ok(pool)
 }
 
-impl Descriptor {
-    pub fn new(
-        device: &Device,
-        set_layout: VkDescriptorSetLayout,
-        view: VkImageView,
-        sampler: VkSampler,
-    ) -> Result<Self, String> {
-        let pool_size = VkDescriptorPoolSize { descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, descriptor_count: 1 };
-        let pool_info = VkDescriptorPoolCreateInfo {
-            s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-            p_next: std::ptr::null(),
-            flags: 0,
-            max_sets: 1,
-            pool_size_count: 1,
-            p_pool_sizes: &pool_size,
-        };
-        let mut pool = VkDescriptorPool::NULL;
-        let result =
-            unsafe { (device.fns.create_descriptor_pool)(device.handle, &pool_info, std::ptr::null(), &mut pool) };
-        if result != VK_SUCCESS {
-            return Err(format!("vkCreateDescriptorPool вернул {result}"));
-        }
-
-        let allocate_info = VkDescriptorSetAllocateInfo {
-            s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            p_next: std::ptr::null(),
-            descriptor_pool: pool,
-            descriptor_set_count: 1,
-            p_set_layouts: &set_layout,
-        };
-        let mut set = VkDescriptorSet::NULL;
-        let result = unsafe { (device.fns.allocate_descriptor_sets)(device.handle, &allocate_info, &mut set) };
-        if result != VK_SUCCESS {
-            unsafe {
-                (device.fns.destroy_descriptor_pool)(device.handle, pool, std::ptr::null());
-            }
-            return Err(format!("vkAllocateDescriptorSets вернул {result}"));
-        }
-
-        let image_info = VkDescriptorImageInfo { sampler, image_view: view, image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        let write = VkWriteDescriptorSet {
-            s_type: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            p_next: std::ptr::null(),
-            dst_set: set,
-            dst_binding: 0,
-            dst_array_element: 0,
-            descriptor_count: 1,
-            descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            p_image_info: &image_info,
-            p_buffer_info: std::ptr::null(),
-            p_texel_buffer_view: std::ptr::null(),
-        };
-        unsafe {
-            (device.fns.update_descriptor_sets)(device.handle, 1, &write, 0, std::ptr::null());
-        }
-
-        Ok(Self { pool, set })
+/// Занять из пула один набор нужной формы.
+///
+/// Освобождать по отдельности не нужно и нечем: пул создан без
+/// `FREE_DESCRIPTOR_SET_BIT`, и все его наборы исчезают разом вместе с ним
+pub fn allocate_set(
+    device: &Device,
+    pool: VkDescriptorPool,
+    set_layout: VkDescriptorSetLayout,
+) -> Result<VkDescriptorSet, String> {
+    let allocate_info = VkDescriptorSetAllocateInfo {
+        s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        p_next: std::ptr::null(),
+        descriptor_pool: pool,
+        descriptor_set_count: 1,
+        p_set_layouts: &set_layout,
+    };
+    let mut set = VkDescriptorSet::NULL;
+    let result = unsafe { (device.fns.allocate_descriptor_sets)(device.handle, &allocate_info, &mut set) };
+    if result != VK_SUCCESS {
+        return Err(format!("vkAllocateDescriptorSets вернул {result}"));
     }
+    Ok(set)
+}
 
-    /// Уничтожает только пул (и вместе с ним, неявно, выделенный из него
-    /// набор) — не layout: тот создан снаружи (`create_set_layout`) и
-    /// уничтожается вместе с pipeline layout в `context.rs`, симметрично
-    /// тому, как он там же и создавался раньше картинки
-    pub fn destroy(&self, device: &Device) {
-        unsafe {
-            (device.fns.destroy_descriptor_pool)(device.handle, self.pool, std::ptr::null());
-        }
+/// Вписать в набор конкретную пару картинка+сэмплер.
+///
+/// Отдельно от выделения потому, что это разные события: набор занимается
+/// один раз, а вписать в него можно и другую картинку — например при
+/// пересборке пула, когда наборы новые, а картинки те же самые
+pub fn write_set(device: &Device, set: VkDescriptorSet, view: VkImageView, sampler: VkSampler) {
+    let image_info =
+        VkDescriptorImageInfo { sampler, image_view: view, image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    let write = VkWriteDescriptorSet {
+        s_type: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        p_next: std::ptr::null(),
+        dst_set: set,
+        dst_binding: 0,
+        dst_array_element: 0,
+        descriptor_count: 1,
+        descriptor_type: VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        p_image_info: &image_info,
+        p_buffer_info: std::ptr::null(),
+        p_texel_buffer_view: std::ptr::null(),
+    };
+    unsafe {
+        (device.fns.update_descriptor_sets)(device.handle, 1, &write, 0, std::ptr::null());
     }
 }

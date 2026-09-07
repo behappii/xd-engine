@@ -44,21 +44,10 @@ pub(super) fn build_raster_jobs<'a>(
     height: u32,
     parallel: bool,
 ) -> Vec<RasterJob<'a>> {
-    // Рассчитываем текущие векторы направления камеры
-    let yaw_rad = scene.yaw.to_radians();
-    let pitch_rad = scene.pitch.to_radians();
-
-    let forward = Vec3::new(
-        yaw_rad.cos() * pitch_rad.cos(),
-        pitch_rad.sin(),
-        yaw_rad.sin() * pitch_rad.cos(),
-    )
-    .normalize();
-
-    // Расчет матрицы Вида (Она едина для всей сцены)
-    let target_pos = scene.camera_position + forward;
-    let up_vector = Vec3::new(0.0, 1.0, 0.0);
-    let view_matrix = Mat4::look_at(scene.camera_position, target_pos, up_vector);
+    // Матрица вида едина для всей сцены — и, с появлением GPU-бэкенда, ещё и
+    // общая с ним: формула живёт в `Scene::view_matrix`, чтобы две камеры не
+    // разъехались молча (подробности там же)
+    let view_matrix = scene.view_matrix();
 
     // отношение ширина:высота экрана
     let aspect = width as f32 / height as f32;
