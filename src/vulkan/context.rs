@@ -1,5 +1,6 @@
-//! `VulkanRenderer` — единственная публичная точка входа Фазы 1: создать
-//! от окна и звать `draw_frame` каждый кадр. Внутри — оркестровка всего
+//! `VulkanRenderer` — единственная публичная точка входа модуля: создать от
+//! окна и звать `draw(&Scene, &Assets)` каждый кадр, теми же сценой и
+//! аренами, что и у CPU-пути. Внутри — оркестровка всего
 //! остального модуля, и здесь же, в одном месте, порядок уничтожения
 //! объектов: у Vulkan он важен (framebuffer держит image view, тот —
 //! swapchain, и так далее), и явный порядок в одной функции читается
@@ -12,34 +13,21 @@
 //! Пересборка swapchain на resize — материал для одной из следующих фаз,
 //! не для «hello triangle»
 
-use crate::math::{Mat4, Vec3};
-use crate::scene::Mesh;
-use crate::texture::Texture;
-use crate::vulkan::buffer::{self, Buffer};
+use crate::config::{DEFAULT_FAR, DEFAULT_FOV, DEFAULT_NEAR};
+use crate::math::Mat4;
+use crate::scene::{Assets, Instance as SceneInstance, Scene};
 use crate::vulkan::depth::DepthBuffer;
-use crate::vulkan::descriptor::{self, Descriptor};
+use crate::vulkan::descriptor;
 use crate::vulkan::device::Device;
 use crate::vulkan::ffi::*;
-use crate::vulkan::image::GpuImage;
+use crate::vulkan::gpu_assets::GpuAssets;
 use crate::vulkan::instance::Instance;
 use crate::vulkan::loader::Library;
-use crate::vulkan::pipeline::{self, GpuVertex, Pipeline, PushConstants};
-use crate::vulkan::sampler;
+use crate::vulkan::pipeline::{self, Pipeline, PushConstants};
 use crate::vulkan::shader;
 use crate::vulkan::surface;
 use crate::vulkan::swapchain::Swapchain;
 use crate::vulkan::sync::FrameSync;
-use std::time::Instant;
-
-/// Статичные данные одного инстанса куба: где стоит, во сколько раз
-/// растянут, с какой скоростью крутится. Не меняется кадр от кадра — только
-/// вход в расчёт `PushConstants`, который зависит ещё и от текущего времени
-/// (см. `VulkanRenderer::instance_push_constants`)
-struct InstanceLayout {
-    offset: Vec3,
-    scale: Vec3,
-    spin_degrees_per_second: f32,
-}
 
 // ВНИМАНИЕ: порядок полей здесь — не оформление, а корректность.
 //
@@ -87,23 +75,15 @@ pub struct VulkanRenderer {
     command_pool: VkCommandPool,
     command_buffer: VkCommandBuffer,
     sync: FrameSync,
-    vertex_buffer: Buffer,
-    index_buffer: Buffer,
-    index_count: u32,
-    texture_image: GpuImage,
-    sampler: VkSampler,
-    descriptor: Descriptor,
-    // Несколько инстансов ОДНОГО куба (общие вершинный/индексный буфер,
-    // общий дескриптор текстуры) — каждый рисуется своим вызовом
-    // `vkCmdDrawIndexed` со своим push-constant'ом, см.
-    // `record_command_buffer`. Данные статичны, вычисляются один раз в
-    // `new`, а не заново каждый кадр
-    instances: Vec<InstanceLayout>,
-    // Момент создания рендерера — единственный источник времени для
-    // анимации кубов. `Instant`, а не счётчик кадров: поворот должен
-    // зависеть от прошедшего времени, а не от FPS (тот же принцип, что у
-    // `dt` в `EngineApp` на CPU-пути)
-    start_time: Instant,
+    // Зеркало `Assets` на видеокарте — буферы мешей и картинки текстур,
+    // разложенные по тем же индексам. Догружается само, по мере того как
+    // растут арены (см. `GpuAssets::sync`)
+    gpu_assets: GpuAssets,
+    // Нужны в каждом кадре, а не только при создании: любая новая аллокация
+    // на GPU (меш или текстура, появившиеся в аренах на ходу) спрашивает у
+    // них подходящий тип памяти. Запрашиваются один раз — у физического
+    // устройства они не меняются
+    memory_properties: VkPhysicalDeviceMemoryProperties,
     // Последние три — и строго в этом порядке. Причина в комментарии над
     // структурой; трогать их местами нельзя, это не стиль
     device: Device,
@@ -174,85 +154,12 @@ impl VulkanRenderer {
         // не хватает даже при одном кадре в полёте
         let sync = FrameSync::new(&device, swapchain.image_views.len())?;
 
-        // Настоящая геометрия вместо зашитого в шейдер треугольника —
-        // ровно то, ради чего затевалась Фаза 2. Куб — тот же
-        // `scene::Mesh::create_cube()`, что и на CPU-пути; несёт уже и
-        // нормаль (Фаза 3 — освещение), и UV (Фаза 4 — текстура), причём
-        // UV у `create_cube` не нулевые — разводка по граням задана ещё в
-        // основном движке (см. «Развёртка куба задана четвёрками углов» в
-        // CLAUDE.md)
-        let cube = Mesh::create_cube();
-        let vertices: Vec<GpuVertex> = cube
-            .vertices
-            .iter()
-            .map(|v| GpuVertex {
-                position: [v.position.x, v.position.y, v.position.z],
-                normal: [v.normal.x, v.normal.y, v.normal.z],
-                uv: [v.uv.x, v.uv.y],
-            })
-            .collect();
-        let indices: Vec<u32> =
-            cube.triangles.iter().flat_map(|t| t.iter().map(|&i| i as u32)).collect();
-        let index_count = indices.len() as u32;
-
-        let vertex_buffer =
-            buffer::upload_data(&device, &memory_properties, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &vertices)?;
-        let index_buffer =
-            buffer::upload_data(&device, &memory_properties, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &indices)?;
-
-        // Шахматка вместо файла с диска — не заглушка, а намеренный выбор
-        // (см. «ни файла, ни художника» у `Texture::checker`): развёртку
-        // куба видно на ней сразу, а движок остаётся самодостаточным —
-        // никакого пути к ассетам не нужно ни этому примеру, ни тесту.
-        // Фильтр по умолчанию `Nearest`/`Nearest` — тот, что и держит
-        // границы клеток резкими
-        let texture = Texture::checker(8, 4, [230, 230, 230, 255], [40, 40, 60, 255]);
-        let pixels = texture.level0_rgba8();
-        let texture_image = GpuImage::upload_rgba8(
-            &device,
-            &memory_properties,
-            command_pool,
-            texture.width(),
-            texture.height(),
-            &pixels,
-        )?;
-        let sampler = match sampler::create(&device, texture.magnify(), texture.minify()) {
-            Ok(sampler) => sampler,
-            Err(err) => {
-                texture_image.destroy(&device);
-                return Err(err);
-            }
-        };
-        let descriptor = match Descriptor::new(&device, descriptor_set_layout, texture_image.view, sampler) {
-            Ok(descriptor) => descriptor,
-            Err(err) => {
-                unsafe {
-                    (device.fns.destroy_sampler)(device.handle, sampler, std::ptr::null());
-                }
-                texture_image.destroy(&device);
-                return Err(err);
-            }
-        };
-
-        // Пять инстансов ОДНОГО куба — общие вершинный/индексный буфер и
-        // дескриптор текстуры, разные положение/масштаб/скорость вращения.
-        // Расставлены с перекрытием в экранных координатах НАРОЧНО: смысл
-        // именно в том, чтобы кубы заслоняли друг друга в порядке, который
-        // определяет тест глубины, а не порядок вызовов `vkCmdDrawIndexed`
-        // (без него побеждал бы просто последний нарисованный — тот самый
-        // класс ошибок, что depth-буфер и существует чинить). Четвёртый
-        // сплющен по Y (`scale.y = 0.35`) — это тот самый случай, который
-        // отличает `normal_matrix()` от простого переиспользования `model`:
-        // у чистого поворота (Фаза 3) они совпадали побайтово, а здесь,
-        // при неравномерном масштабе, уже нет (см. «Нормаль — не просто
-        // направление» в CLAUDE.md)
-        let instances = vec![
-            InstanceLayout { offset: Vec3::new(-1.8, 0.0, 1.5), scale: Vec3::new(1.0, 1.0, 1.0), spin_degrees_per_second: 30.0 },
-            InstanceLayout { offset: Vec3::new(0.0, 0.0, 0.0), scale: Vec3::new(1.0, 1.0, 1.0), spin_degrees_per_second: 45.0 },
-            InstanceLayout { offset: Vec3::new(1.3, 0.4, -1.8), scale: Vec3::new(1.0, 1.0, 1.0), spin_degrees_per_second: 60.0 },
-            InstanceLayout { offset: Vec3::new(-0.7, -1.0, -1.2), scale: Vec3::new(1.0, 0.35, 1.0), spin_degrees_per_second: 20.0 },
-            InstanceLayout { offset: Vec3::new(2.3, 0.7, 2.0), scale: Vec3::new(0.6, 0.6, 0.6), spin_degrees_per_second: -35.0 },
-        ];
+        // Зеркало арен — пустое: ни одного меша и ни одной текстуры до
+        // первого `draw`, потому что сцены рендерер ещё не видел. Внутри
+        // сразу заводится только белая заглушка 1x1 для инстансов без
+        // текстуры (см. `gpu_assets`). Командный пул нужен ей для той же
+        // одноразовой заливки, что и любой другой картинке
+        let gpu_assets = GpuAssets::new(&device, &memory_properties, command_pool, descriptor_set_layout)?;
 
         Ok(Self {
             lib,
@@ -268,22 +175,28 @@ impl VulkanRenderer {
             command_pool,
             command_buffer,
             sync,
-            vertex_buffer,
-            index_buffer,
-            index_count,
-            texture_image,
-            sampler,
-            descriptor,
-            instances,
-            start_time: Instant::now(),
+            gpu_assets,
+            memory_properties,
         })
     }
 
-    /// Рисует один кадр: несколько инстансов куба поверх тёмно-синего фона.
+    /// Рисует один кадр сцены — второй путь к тому же миру, что и
+    /// `Scene::draw` на CPU.
+    ///
+    /// Принимает и сцену, и арены, ровно как CPU-путь, и по той же причине:
+    /// у мира и у ресурсов разные сроки жизни (CLAUDE.md, «Ресурсы и мир —
+    /// разные типы»). Несколько сцен в один кадр здесь тоже возможны — но не
+    /// так, как на CPU: там второй `draw` в те же буферы, а тут пришлось бы
+    /// не завершать render pass между ними. Пока не понадобилось.
+    ///
     /// Ждёт GPU перед началом (см. doc-комментарий модуля — почему один
-    /// кадр в полёте, а не несколько) — цена этого ожидания на пяти кубах
-    /// по-прежнему не видна, оптимизировать пока нечего
-    pub fn draw_frame(&mut self) -> Result<(), String> {
+    /// кадр в полёте, а не несколько)
+    pub fn draw(&mut self, scene: &Scene, assets: &Assets) -> Result<(), String> {
+        // Догрузить то, что появилось в аренах с прошлого кадра. Обычно это
+        // два сравнения длин и ничего больше; настоящая работа случается
+        // только когда игра и правда завела новый меш или текстуру
+        self.gpu_assets.sync(&self.device, &self.memory_properties, self.command_pool, assets)?;
+
         let d = &self.device;
 
         unsafe {
@@ -311,7 +224,7 @@ impl VulkanRenderer {
         unsafe {
             (d.fns.reset_command_buffer)(self.command_buffer, 0);
         }
-        self.record_command_buffer(image_index)?;
+        self.record_command_buffer(image_index, scene)?;
 
         // Семафор берётся по номеру ПОЛУЧЕННОЙ картинки, а не один общий:
         // показ предыдущего кадра мог ещё держать свой (см. doc-комментарий
@@ -355,7 +268,7 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    fn record_command_buffer(&self, image_index: u32) -> Result<(), String> {
+    fn record_command_buffer(&self, image_index: u32, scene: &Scene) -> Result<(), String> {
         let d = &self.device;
 
         let begin_info =
@@ -403,38 +316,67 @@ impl VulkanRenderer {
         };
         let scissor = VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: self.swapchain.extent };
 
-        // Вершинный/индексный буфер и дескриптор текстуры — ОБЩИЕ на все
-        // инстансы (одна и та же геометрия, одна и та же шахматка), поэтому
-        // биндятся один раз ДО цикла, а не в нём: перебиндивать одно и то же
-        // на каждый инстанс было бы лишними вызовами без единого эффекта
-        let offset: VkDeviceSize = 0;
+        // Viewport и scissor — одни на кадр, их и правда можно задать до
+        // цикла. А вот буферы с дескриптором теперь у каждого инстанса свои:
+        // мешей в сцене много, текстур тоже, и «привязать один раз» больше не
+        // выйдет. Это обычная цена настоящей сцены, а не потеря оптимизации —
+        // сортировка инстансов по мешу и текстуре, чтобы сократить смены
+        // привязок, делается позже и по замеру, а не наугад
         unsafe {
             (d.fns.cmd_set_viewport)(self.command_buffer, 0, 1, &viewport);
             (d.fns.cmd_set_scissor)(self.command_buffer, 0, 1, &scissor);
-            (d.fns.cmd_bind_vertex_buffers)(self.command_buffer, 0, 1, &self.vertex_buffer.handle, &offset);
-            (d.fns.cmd_bind_index_buffer)(self.command_buffer, self.index_buffer.handle, 0, VK_INDEX_TYPE_UINT32);
-            (d.fns.cmd_bind_descriptor_sets)(
-                self.command_buffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                self.pipeline.layout,
-                0,
-                1,
-                &self.descriptor.set,
-                0,
-                std::ptr::null(),
-            );
         }
 
-        // view/projection — ОДНИ на кадр (камера у всех инстансов общая),
-        // считаются один раз вне цикла; у каждого инстанса меняется только
-        // model — и то, что из него следует (MVP, матрица нормалей)
-        let elapsed = self.start_time.elapsed().as_secs_f32();
-        let (view, projection) = self.view_projection();
-        let view_projection = &projection * &view;
+        // view/projection — ОДНИ на кадр (камера у сцены одна), считаются
+        // один раз вне цикла; у каждого инстанса меняется только model — и
+        // то, что из него следует (MVP, матрица нормалей)
+        let view_projection = &self.projection() * &scene.view_matrix();
 
-        for layout in &self.instances {
-            let push_constants = instance_push_constants(&view_projection, layout, elapsed);
+        let offset: VkDeviceSize = 0;
+        for instance in &scene.instances {
+            // Проволока на GPU-пути не поддержана вовсе: линиям нужен второй
+            // пайплайн с `VK_POLYGON_MODE_LINE`, а это ещё и фича устройства
+            // (`fillModeNonSolid`), которую полагается спрашивать. Пропускаем,
+            // но не молча — иначе инстанс просто исчезнет, и искать причину
+            // будут в геометрии
+            if instance.wireframe {
+                WIREFRAME_UNSUPPORTED.call_once(|| {
+                    eprintln!(
+                        "xd_engine: Vulkan-путь не рисует проволочные инстансы — они пропущены (на CPU-пути они есть)"
+                    );
+                });
+                continue;
+            }
+            if instance.face_colors.is_some() {
+                FACE_COLORS_UNSUPPORTED.call_once(|| {
+                    eprintln!(
+                        "xd_engine: Vulkan-путь не знает про раскраску по граням — взят цвет инстанса целиком"
+                    );
+                });
+            }
+
+            // Пустой меш — законное состояние, а не ошибка: рисовать нечего,
+            // буферов у него нет (см. `gpu_assets`)
+            let Some(mesh) = self.gpu_assets.mesh(instance.mesh) else {
+                continue;
+            };
+
+            let push_constants = instance_push_constants(&view_projection, instance);
+            let set = self.gpu_assets.descriptor_set(instance.texture);
+
             unsafe {
+                (d.fns.cmd_bind_vertex_buffers)(self.command_buffer, 0, 1, &mesh.vertex.handle, &offset);
+                (d.fns.cmd_bind_index_buffer)(self.command_buffer, mesh.index.handle, 0, VK_INDEX_TYPE_UINT32);
+                (d.fns.cmd_bind_descriptor_sets)(
+                    self.command_buffer,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    self.pipeline.layout,
+                    0,
+                    1,
+                    &set,
+                    0,
+                    std::ptr::null(),
+                );
                 (d.fns.cmd_push_constants)(
                     self.command_buffer,
                     self.pipeline.layout,
@@ -443,7 +385,7 @@ impl VulkanRenderer {
                     std::mem::size_of::<PushConstants>() as u32,
                     &push_constants as *const PushConstants as *const std::ffi::c_void,
                 );
-                (d.fns.cmd_draw_indexed)(self.command_buffer, self.index_count, 1, 0, 0, 0);
+                (d.fns.cmd_draw_indexed)(self.command_buffer, mesh.index_count, 1, 0, 0, 0);
             }
         }
 
@@ -458,25 +400,26 @@ impl VulkanRenderer {
         Ok(())
     }
 
-    /// Камера — общая для всех инстансов кадра, поэтому вынесена из
-    /// расчёта push-constant'ов одного инстанса (`instance_push_constants`)
-    /// в отдельный метод: считать один и тот же `view`/`projection` пять
-    /// раз за кадр (по числу кубов) было бы не ошибкой, а просто лишней
-    /// работой без единого отличия в результате
-    fn view_projection(&self) -> (Mat4, Mat4) {
-        // Отодвинута дальше и чуть приподнята относительно Фазы 2-4
-        // (там была одна-единственная камера у начала координат) — пятерым
-        // кубам, разложенным с перекрытием (см. `instances` в `new`),
-        // нужен обзор шире, чем одному кубу в центре кадра
-        let eye = Vec3::new(0.0, 1.5, 9.0);
-        let view = Mat4::look_at(eye, Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
-
+    /// Матрица проекции. Камеры здесь нет вовсе — она в сцене
+    /// (`Scene::view_matrix`), общая с CPU-путём.
+    ///
+    /// А вот проекция общей быть не может, и это не недоделка: угол обзора и
+    /// плоскости отсечения берутся те же самые, из `config`, но конвенции у
+    /// двух API разные — глубина `[0, 1]` вместо `[-1, 1]` и перевёрнутый Y
+    /// (см. `vulkan_perspective`). Общее — то, что описывает мир; своё — то,
+    /// что описывает API
+    fn projection(&self) -> Mat4 {
         let aspect = self.swapchain.extent.width as f32 / self.swapchain.extent.height as f32;
-        let projection = vulkan_perspective(60.0, aspect, 0.1, 100.0);
 
-        (view, projection)
+        vulkan_perspective(DEFAULT_FOV, aspect, DEFAULT_NEAR, DEFAULT_FAR)
     }
 }
+
+/// Предупреждать один раз за процесс, а не каждый кадр: сообщение про
+/// неподдержанную возможность полезно ровно однажды, а шестьдесят раз в
+/// секунду оно превращается в помеху, за которой не видно настоящих ошибок
+static WIREFRAME_UNSUPPORTED: std::sync::Once = std::sync::Once::new();
+static FACE_COLORS_UNSUPPORTED: std::sync::Once = std::sync::Once::new();
 
 impl Drop for VulkanRenderer {
     fn drop(&mut self) {
@@ -489,11 +432,11 @@ impl Drop for VulkanRenderer {
             (d.fns.device_wait_idle)(d.handle);
 
             self.sync.destroy(d);
-            self.vertex_buffer.destroy(d);
-            self.index_buffer.destroy(d);
-            self.descriptor.destroy(d);
-            (d.fns.destroy_sampler)(d.handle, self.sampler, std::ptr::null());
-            self.texture_image.destroy(d);
+            // Вся арена разом: буферы мешей, картинки и сэмплеры текстур,
+            // пул дескрипторов. `set_layout` при этом не её — он создан
+            // здесь и здесь же уничтожается ниже, потому что на него
+            // ссылается ещё и layout пайплайна
+            self.gpu_assets.destroy(d);
             (d.fns.destroy_command_pool)(d.handle, self.command_pool, std::ptr::null());
             for &framebuffer in &self.framebuffers {
                 (d.fns.destroy_framebuffer)(d.handle, framebuffer, std::ptr::null());
@@ -516,36 +459,30 @@ impl Drop for VulkanRenderer {
     }
 }
 
-/// MVP и матрица нормалей одного инстанса на текущий момент — каждый куб
-/// крутится вокруг Y со своей скоростью (`InstanceLayout::spin_degrees_per_second`),
-/// не для красоты, а как самая простая проверка, что push-constant и правда
-/// доезжает до шейдера заново на каждый вызов `vkCmdDrawIndexed`, а не
-/// читается один раз и застывает на всех инстансах разом.
+/// MVP, матрица нормалей и цвет одного инстанса — всё, что шейдер получает
+/// про него и что меняется от инстанса к инстансу.
 ///
-/// `model = T(offset) · Rx(20°) · Ry(angle) · S(scale)` — тот же порядок
-/// компоновки T·R·S, что у `Instance::get_model_matrix` на CPU-пути (см.
-/// CLAUDE.md), только без Rz (эта демонстрация крутит только вокруг Y).
+/// Модельная матрица берётся у самого инстанса (`Instance::get_model_matrix`),
+/// а не собирается здесь заново: порядок компоновки T·R·S — это правило
+/// движка, и второе его изложение в GPU-пути рано или поздно разошлось бы с
+/// первым.
 ///
 /// Матрица нормалей всегда считается через `normal_matrix()`, а не
-/// переиспользует `model` напрямую: у ЧЕТЫРЁХ инстансов масштаб
-/// единичный или равномерный, и там `normal_matrix()` совпал бы с `model`
-/// побайтово (см. «Нормаль — не просто направление» в CLAUDE.md — как раз
-/// то, что уже наблюдалось в Фазе 3 на одиночном кубе), но у ПЯТОГО
-/// (`scale.y = 0.35`, сплющен) — нет: наивное переиспользование `model`
-/// там дало бы неверно повёрнутые нормали и грань, темнеющую там, где
-/// обязана светлеть, — ровно баг, которого больше нет благодаря тесту
-/// `squashing_an_object_turns_its_normals_towards_the_light` на CPU-пути.
-fn instance_push_constants(view_projection: &Mat4, layout: &InstanceLayout, elapsed: f32) -> PushConstants {
-    let spin_angle = elapsed * layout.spin_degrees_per_second;
-
-    let rotation = &Mat4::rotation_x(20.0) * &Mat4::rotation_y(spin_angle);
-    let scale_mat = Mat4::scaling(layout.scale.x, layout.scale.y, layout.scale.z);
-    let translation = Mat4::translation(layout.offset.x, layout.offset.y, layout.offset.z);
-    let model = &translation * &(&rotation * &scale_mat);
-
+/// переиспользует `model`: при равномерном масштабе они совпали бы побайтово,
+/// но при НЕравномерном — нет, и грань потемнела бы там, где обязана
+/// светлеть (CLAUDE.md, «Нормаль — не просто направление»). Берётся только
+/// её верхний левый 3x3, а `w` каждого столбца обнуляется: транспонирование
+/// обратной матрицы заносит туда перенос, который направлению ни к чему.
+fn instance_push_constants(view_projection: &Mat4, instance: &SceneInstance) -> PushConstants {
+    let model = instance.get_model_matrix();
     let normal_matrix = model.normal_matrix();
     let mvp = view_projection * &model;
     let nm = normal_matrix.cols;
+
+    // Цвет инстанса — байты 0..255 на CPU-пути, а шейдер множит на яркость в
+    // 0..1. Делим, а не приводим: 255 обязано дать ровно 1.0, иначе белый
+    // инстанс под полным светом вышел бы чуть темнее себя
+    let color = |c: u8| c as f32 / 255.0;
 
     PushConstants {
         mvp: mvp.cols,
@@ -553,6 +490,12 @@ fn instance_push_constants(view_projection: &Mat4, layout: &InstanceLayout, elap
             [nm[0][0], nm[0][1], nm[0][2], 0.0],
             [nm[1][0], nm[1][1], nm[1][2], 0.0],
             [nm[2][0], nm[2][1], nm[2][2], 0.0],
+        ],
+        color: [
+            color(instance.color[0]),
+            color(instance.color[1]),
+            color(instance.color[2]),
+            1.0,
         ],
     }
 }

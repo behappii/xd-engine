@@ -1,4 +1,4 @@
-use crate::math::Vec3;
+use crate::math::{Mat4, Vec3};
 
 use super::{
     Assets, Instance, MeshId,
@@ -32,6 +32,45 @@ impl Scene {
 
     pub fn add_instance(&mut self, instance: Instance) {
         self.instances.push(instance);
+    }
+
+    /// Куда смотрит камера — единичный вектор из `yaw`/`pitch`.
+    ///
+    /// `yaw` отсчитывается вокруг Y, `pitch` — подъём над горизонтом, оба в
+    /// градусах. Обратите внимание на сборку вектора: `pitch` даёт Y напрямую
+    /// (`sin`), а горизонтальную составляющую ужимает множителем `cos` — без
+    /// него при взгляде вверх вектор перестал бы быть единичным и камера
+    /// поехала бы тем сильнее, чем выше смотришь
+    pub fn forward(&self) -> Vec3 {
+        let yaw_rad = self.yaw.to_radians();
+        let pitch_rad = self.pitch.to_radians();
+
+        Vec3::new(
+            yaw_rad.cos() * pitch_rad.cos(),
+            pitch_rad.sin(),
+            yaw_rad.sin() * pitch_rad.cos(),
+        )
+        .normalize()
+    }
+
+    /// Матрица вида — одна на кадр и ОДНА НА ОБА БЭКЕНДА.
+    ///
+    /// Раньше это лежало прямо в `build_raster_jobs`, и пока путь отрисовки
+    /// был один, разницы не было. Теперь их два, и вторая копия этой формулы
+    /// была бы худшим видом дубля: разъехавшись, две камеры дали бы два
+    /// правдоподобных, но разных кадра — а искать причину пришлось бы в
+    /// геометрии, в освещении, где угодно, только не в том, что один путь
+    /// считает `pitch` чуть иначе.
+    ///
+    /// Проекция при этом у каждого своя, и это не непоследовательность:
+    /// у CPU-пути NDC по глубине `[-1, 1]` (OpenGL), у Vulkan — `[0, 1]` и
+    /// перевёрнутый Y. Общей может быть только та часть, которая описывает
+    /// МИР, а не конвенции конкретного API
+    pub(crate) fn view_matrix(&self) -> Mat4 {
+        let target = self.camera_position + self.forward();
+        let up = Vec3::new(0.0, 1.0, 0.0);
+
+        Mat4::look_at(self.camera_position, target, up)
     }
 
     /// Завести инстанс и сразу получить ссылку на него.
@@ -111,5 +150,65 @@ impl Scene {
             .build()
             .expect("не удалось собрать пул потоков")
             .install(|| self.draw(assets, frame, depth, width, height));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Заодно проверяет умолчание сцены: `yaw = -90` — это взгляд вдоль
+    /// МИНУС Z, то есть «вперёд» в правой системе координат. Число это
+    /// выглядит произвольным ровно до тех пор, пока не подставишь его в
+    /// формулу, поэтому пусть проверка стоит рядом
+    #[test]
+    fn the_default_camera_looks_down_minus_z() {
+        let forward = Scene::new().forward();
+
+        assert!((forward.x - 0.0).abs() < 1e-6, "x = {}", forward.x);
+        assert!((forward.y - 0.0).abs() < 1e-6, "y = {}", forward.y);
+        assert!((forward.z + 1.0).abs() < 1e-6, "z = {}", forward.z);
+    }
+
+    #[test]
+    fn looking_straight_up_keeps_the_direction_unit_length() {
+        // Тот самый множитель `cos(pitch)` у горизонтальных составляющих:
+        // без него при `pitch = 90` вектор был бы (cos(yaw), 1, sin(yaw)) —
+        // длиной √2, и камера поехала бы тем сильнее, чем выше смотришь
+        let mut scene = Scene::new();
+        scene.pitch = 90.0;
+
+        let forward = scene.forward();
+
+        assert!((forward.y - 1.0).abs() < 1e-6, "смотрим не строго вверх");
+        assert!(
+            (forward.length() - 1.0).abs() < 1e-6,
+            "длина {} вместо единицы",
+            forward.length()
+        );
+    }
+
+    /// Главное здесь — связка `forward` и `view_matrix`: точка ровно перед
+    /// камерой обязана оказаться на оси −Z пространства вида, где бы сама
+    /// камера ни стояла и куда бы ни смотрела.
+    ///
+    /// Это и есть тот инвариант, ради которого матрица вида вынесена в общее
+    /// место: оба бэкенда строят её отсюда, и если формула разъедется, кадры
+    /// разойдутся молча — оба останутся правдоподобными
+    #[test]
+    fn a_point_straight_ahead_lands_on_the_view_axis() {
+        let mut scene = Scene::new();
+        scene.camera_position = Vec3::new(3.0, -2.0, 7.0);
+        scene.yaw = 33.0;
+        scene.pitch = -18.0;
+
+        let ahead = scene.camera_position + scene.forward();
+        let in_view = &scene.view_matrix() * ahead;
+
+        assert!((in_view.x).abs() < 1e-5, "съехало вбок: {}", in_view.x);
+        assert!((in_view.y).abs() < 1e-5, "съехало вверх: {}", in_view.y);
+        // Минус, а не плюс: пространство вида смотрит вдоль −Z — та же
+        // конвенция, под которую посчитан `Mat4::perspective`
+        assert!((in_view.z + 1.0).abs() < 1e-5, "по глубине: {}", in_view.z);
     }
 }

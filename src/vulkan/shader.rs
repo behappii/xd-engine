@@ -279,7 +279,7 @@ fn vertex_shader() -> Vec<u32> {
     // только `spirv-val` или слой валидации — то есть ровно то, чего на
     // машине разработки нет (см. оговорку в doc-комментарии модуля)
     b.inst(OP_DECORATE, &[mvp_struct_ty, DECORATION_BLOCK]);
-    for (member, offset) in [(0, 0), (1, 16), (2, 32), (3, 48), (4, 64), (5, 80), (6, 96)] {
+    for (member, offset) in [(0, 0), (1, 16), (2, 32), (3, 48), (4, 64), (5, 80), (6, 96), (7, 112)] {
         b.inst(OP_MEMBER_DECORATE, &[mvp_struct_ty, member, DECORATION_OFFSET, offset]);
     }
 
@@ -300,7 +300,17 @@ fn vertex_shader() -> Vec<u32> {
     // `Offset` на каждом члене) записаны выше, в секции аннотаций
     b.inst(
         OP_TYPE_STRUCT,
-        &[mvp_struct_ty, v4float_ty, v4float_ty, v4float_ty, v4float_ty, v4float_ty, v4float_ty, v4float_ty],
+        &[
+            mvp_struct_ty,
+            v4float_ty,
+            v4float_ty,
+            v4float_ty,
+            v4float_ty,
+            v4float_ty,
+            v4float_ty,
+            v4float_ty,
+            v4float_ty,
+        ],
     );
 
     let ptr_pushconstant_struct_ty = b.id();
@@ -320,7 +330,7 @@ fn vertex_shader() -> Vec<u32> {
     // переиспользуемой переменной-счётчика
     let int_ty = b.id();
     b.inst(OP_TYPE_INT, &[int_ty, 32, 1]);
-    let int_consts: Vec<u32> = (0..7u32)
+    let int_consts: Vec<u32> = (0..8u32)
         .map(|i| {
             let id = b.id();
             b.inst(OP_CONSTANT, &[int_ty, id, i]);
@@ -375,30 +385,14 @@ fn vertex_shader() -> Vec<u32> {
     let one_minus_ambient = b.id();
     b.inst(OP_CONSTANT, &[float_ty, one_minus_ambient, (1.0 - crate::config::AMBIENT_LIGHT).to_bits()]);
 
-    // Базовый цвет грани: материалов на GPU-пути пока нет (текстура из
-    // Фазы 4 не отменяет его, а домножается на него во фрагментном шейдере),
-    // поэтому это та же оранжевая заглушка, что в Фазе 1 была жёстко зашита
-    // во фрагментный шейдер, — просто теперь она умножается на освещение, а
-    // не выводится как есть.
-    //
-    // Красная и синяя компоненты — это `float_1`/`float_0`, объявленные
-    // выше, а не свои такие же константы. Дублировать нельзя: неагрегатные
-    // типы и константы в SPIR-V уникальны по паре (тип, значение), и два
-    // `OpConstant` с одинаковым `float` и одинаковым значением — такая же
-    // тихая ошибка раскладки модуля, как порядок секций выше: наш драйвер её
-    // проглотит, `spirv-val` — нет
-    let base_g = b.id();
-    b.inst(OP_CONSTANT, &[float_ty, base_g, 0.55f32.to_bits()]);
-    let base_color = b.id();
-    b.inst(OP_CONSTANT_COMPOSITE, &[v3float_ty, base_color, float_1, base_g, float_0]);
-
     b.inst(OP_FUNCTION, &[void_ty, main_id, FUNCTION_CONTROL_NONE, voidfn_ty]);
     let entry_label = b.id();
     b.inst(OP_LABEL, &[entry_label]);
 
-    // Семь столбцов push-константы — по одному access chain на член
-    // структуры: первые четыре — MVP, следующие три — матрица нормалей
-    let mut cols = Vec::with_capacity(7);
+    // Восемь членов push-константы — по одному access chain на каждый:
+    // первые четыре MVP, следующие три матрица нормалей, последний цвет
+    // инстанса
+    let mut cols = Vec::with_capacity(8);
     for &idx in &int_consts {
         let access = b.id();
         b.inst(OP_ACCESS_CHAIN, &[ptr_pushconstant_v4float_ty, access, mvp_var, idx]);
@@ -406,7 +400,9 @@ fn vertex_shader() -> Vec<u32> {
         b.inst(OP_LOAD, &[v4float_ty, col, access]);
         cols.push(col);
     }
-    let (mvp_cols, normal_cols) = cols.split_at(4);
+    let mvp_cols = &cols[0..4];
+    let normal_cols = &cols[4..7];
+    let instance_color = cols[7];
 
     // Позиция вершины → clip space (Фаза 2, без изменений): x, y, z по
     // отдельности — компоненты нужны как скаляры, чтобы «размножить»
@@ -496,6 +492,19 @@ fn vertex_shader() -> Vec<u32> {
     b.inst(OP_FMUL, &[float_ty, scaled, one_minus_ambient, lambert]);
     let intensity = b.id();
     b.inst(OP_FADD, &[float_ty, intensity, ambient, scaled]);
+
+    // Цвет инстанса приезжает vec4 (блок выравнивает члены по 16 байт), а
+    // умножать надо vec3 — четвёртая компонента к делу не относится, альфы в
+    // пайплайне нет. Разбираем и собираем тем же приёмом, что уже применён к
+    // текселю во фрагментном шейдере, вместо ещё одного опкода
+    let color_r = b.id();
+    b.inst(OP_COMPOSITE_EXTRACT, &[float_ty, color_r, instance_color, 0]);
+    let color_g = b.id();
+    b.inst(OP_COMPOSITE_EXTRACT, &[float_ty, color_g, instance_color, 1]);
+    let color_b = b.id();
+    b.inst(OP_COMPOSITE_EXTRACT, &[float_ty, color_b, instance_color, 2]);
+    let base_color = b.id();
+    b.inst(OP_COMPOSITE_CONSTRUCT, &[v3float_ty, base_color, color_r, color_g, color_b]);
 
     let intensity_v3 = b.id();
     b.inst(OP_COMPOSITE_CONSTRUCT, &[v3float_ty, intensity_v3, intensity, intensity, intensity]);
