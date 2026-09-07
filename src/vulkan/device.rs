@@ -6,9 +6,9 @@
 //! `loader.rs` — почему через `vkGetDeviceProcAddr`, а не через тот же
 //! путь, что у `InstanceFns`).
 
-use crate::vk_load_device;
+use crate::vulkan::loader::vk_load_device;
 use crate::vulkan::ffi::*;
-use crate::vulkan::instance::Instance;
+use crate::vulkan::instance::{Instance, PfnGetDeviceProcAddr};
 use std::ffi::c_void;
 
 type PfnDestroyDevice = unsafe extern "system" fn(VkDevice, *const c_void);
@@ -274,315 +274,23 @@ impl Device {
         }
 
         let get_device_proc_addr = instance.fns.get_device_proc_addr;
-        let fns = DeviceFns {
-            destroy_device: vk_load_device!(get_device_proc_addr, handle, "vkDestroyDevice", PfnDestroyDevice),
-            get_device_queue: vk_load_device!(get_device_proc_addr, handle, "vkGetDeviceQueue", PfnGetDeviceQueue),
-            create_swapchain_khr: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateSwapchainKHR",
-                PfnCreateSwapchainKHR
-            ),
-            destroy_swapchain_khr: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroySwapchainKHR",
-                PfnDestroySwapchainKHR
-            ),
-            get_swapchain_images_khr: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkGetSwapchainImagesKHR",
-                PfnGetSwapchainImagesKHR
-            ),
-            acquire_next_image_khr: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkAcquireNextImageKHR",
-                PfnAcquireNextImageKHR
-            ),
-            queue_present_khr: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkQueuePresentKHR",
-                PfnQueuePresentKHR
-            ),
-            create_image_view: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateImageView",
-                PfnCreateImageView
-            ),
-            destroy_image_view: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroyImageView",
-                PfnDestroyImageView
-            ),
-            create_shader_module: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateShaderModule",
-                PfnCreateShaderModule
-            ),
-            destroy_shader_module: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroyShaderModule",
-                PfnDestroyShaderModule
-            ),
-            create_render_pass: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateRenderPass",
-                PfnCreateRenderPass
-            ),
-            destroy_render_pass: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroyRenderPass",
-                PfnDestroyRenderPass
-            ),
-            create_pipeline_layout: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreatePipelineLayout",
-                PfnCreatePipelineLayout
-            ),
-            destroy_pipeline_layout: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroyPipelineLayout",
-                PfnDestroyPipelineLayout
-            ),
-            create_graphics_pipelines: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateGraphicsPipelines",
-                PfnCreateGraphicsPipelines
-            ),
-            destroy_pipeline: vk_load_device!(get_device_proc_addr, handle, "vkDestroyPipeline", PfnDestroyPipeline),
-            create_framebuffer: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateFramebuffer",
-                PfnCreateFramebuffer
-            ),
-            destroy_framebuffer: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroyFramebuffer",
-                PfnDestroyFramebuffer
-            ),
-            create_command_pool: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateCommandPool",
-                PfnCreateCommandPool
-            ),
-            destroy_command_pool: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroyCommandPool",
-                PfnDestroyCommandPool
-            ),
-            allocate_command_buffers: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkAllocateCommandBuffers",
-                PfnAllocateCommandBuffers
-            ),
-            free_command_buffers: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkFreeCommandBuffers",
-                PfnFreeCommandBuffers
-            ),
-            begin_command_buffer: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkBeginCommandBuffer",
-                PfnBeginCommandBuffer
-            ),
-            end_command_buffer: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkEndCommandBuffer",
-                PfnEndCommandBuffer
-            ),
-            reset_command_buffer: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkResetCommandBuffer",
-                PfnResetCommandBuffer
-            ),
-            cmd_begin_render_pass: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdBeginRenderPass",
-                PfnCmdBeginRenderPass
-            ),
-            cmd_end_render_pass: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdEndRenderPass",
-                PfnCmdEndRenderPass
-            ),
-            cmd_bind_pipeline: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdBindPipeline",
-                PfnCmdBindPipeline
-            ),
-            cmd_set_viewport: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdSetViewport",
-                PfnCmdSetViewport
-            ),
-            cmd_set_scissor: vk_load_device!(get_device_proc_addr, handle, "vkCmdSetScissor", PfnCmdSetScissor),
-            cmd_draw: vk_load_device!(get_device_proc_addr, handle, "vkCmdDraw", PfnCmdDraw),
-            create_semaphore: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateSemaphore",
-                PfnCreateSemaphore
-            ),
-            destroy_semaphore: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroySemaphore",
-                PfnDestroySemaphore
-            ),
-            create_fence: vk_load_device!(get_device_proc_addr, handle, "vkCreateFence", PfnCreateFence),
-            destroy_fence: vk_load_device!(get_device_proc_addr, handle, "vkDestroyFence", PfnDestroyFence),
-            wait_for_fences: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkWaitForFences",
-                PfnWaitForFences
-            ),
-            reset_fences: vk_load_device!(get_device_proc_addr, handle, "vkResetFences", PfnResetFences),
-            queue_submit: vk_load_device!(get_device_proc_addr, handle, "vkQueueSubmit", PfnQueueSubmit),
-            device_wait_idle: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDeviceWaitIdle",
-                PfnDeviceWaitIdle
-            ),
-            create_buffer: vk_load_device!(get_device_proc_addr, handle, "vkCreateBuffer", PfnCreateBuffer),
-            destroy_buffer: vk_load_device!(get_device_proc_addr, handle, "vkDestroyBuffer", PfnDestroyBuffer),
-            get_buffer_memory_requirements: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkGetBufferMemoryRequirements",
-                PfnGetBufferMemoryRequirements
-            ),
-            allocate_memory: vk_load_device!(get_device_proc_addr, handle, "vkAllocateMemory", PfnAllocateMemory),
-            free_memory: vk_load_device!(get_device_proc_addr, handle, "vkFreeMemory", PfnFreeMemory),
-            bind_buffer_memory: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkBindBufferMemory",
-                PfnBindBufferMemory
-            ),
-            map_memory: vk_load_device!(get_device_proc_addr, handle, "vkMapMemory", PfnMapMemory),
-            unmap_memory: vk_load_device!(get_device_proc_addr, handle, "vkUnmapMemory", PfnUnmapMemory),
-            cmd_bind_vertex_buffers: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdBindVertexBuffers",
-                PfnCmdBindVertexBuffers
-            ),
-            cmd_bind_index_buffer: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdBindIndexBuffer",
-                PfnCmdBindIndexBuffer
-            ),
-            cmd_push_constants: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdPushConstants",
-                PfnCmdPushConstants
-            ),
-            cmd_draw_indexed: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdDrawIndexed",
-                PfnCmdDrawIndexed
-            ),
-            create_image: vk_load_device!(get_device_proc_addr, handle, "vkCreateImage", PfnCreateImage),
-            destroy_image: vk_load_device!(get_device_proc_addr, handle, "vkDestroyImage", PfnDestroyImage),
-            get_image_memory_requirements: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkGetImageMemoryRequirements",
-                PfnGetImageMemoryRequirements
-            ),
-            bind_image_memory: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkBindImageMemory",
-                PfnBindImageMemory
-            ),
-            create_sampler: vk_load_device!(get_device_proc_addr, handle, "vkCreateSampler", PfnCreateSampler),
-            destroy_sampler: vk_load_device!(get_device_proc_addr, handle, "vkDestroySampler", PfnDestroySampler),
-            create_descriptor_set_layout: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateDescriptorSetLayout",
-                PfnCreateDescriptorSetLayout
-            ),
-            destroy_descriptor_set_layout: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroyDescriptorSetLayout",
-                PfnDestroyDescriptorSetLayout
-            ),
-            create_descriptor_pool: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCreateDescriptorPool",
-                PfnCreateDescriptorPool
-            ),
-            destroy_descriptor_pool: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkDestroyDescriptorPool",
-                PfnDestroyDescriptorPool
-            ),
-            allocate_descriptor_sets: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkAllocateDescriptorSets",
-                PfnAllocateDescriptorSets
-            ),
-            update_descriptor_sets: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkUpdateDescriptorSets",
-                PfnUpdateDescriptorSets
-            ),
-            cmd_pipeline_barrier: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdPipelineBarrier",
-                PfnCmdPipelineBarrier
-            ),
-            cmd_copy_buffer_to_image: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdCopyBufferToImage",
-                PfnCmdCopyBufferToImage
-            ),
-            cmd_bind_descriptor_sets: vk_load_device!(
-                get_device_proc_addr,
-                handle,
-                "vkCmdBindDescriptorSets",
-                PfnCmdBindDescriptorSets
-            ),
-            queue_wait_idle: vk_load_device!(get_device_proc_addr, handle, "vkQueueWaitIdle", PfnQueueWaitIdle),
+        // `vkDestroyDevice` — первой и отдельно, по той же причине, что и
+        // `vkDestroyInstance` в `instance.rs`: `vk_load_device!` на неудаче
+        // делает `return Err`, и пока вся таблица собиралась одним литералом
+        // прямо здесь, любая ненайденная функция уносила управление из `new`
+        // мимо уборки, оставляя живой `VkDevice`. Тут это дороже, чем у
+        // instance: таблица длиной под сотню функций, то есть под сотню
+        // возможных точек выхода
+        let destroy_device: PfnDestroyDevice =
+            vk_load_device!(get_device_proc_addr, handle, "vkDestroyDevice", PfnDestroyDevice);
+        let fns = match load_device_fns(get_device_proc_addr, handle, destroy_device) {
+            Ok(fns) => fns,
+            Err(err) => {
+                unsafe {
+                    destroy_device(handle, std::ptr::null());
+                }
+                return Err(err);
+            }
         };
 
         let mut queue = VkQueue::NULL;
@@ -606,6 +314,326 @@ impl Drop for Device {
             (self.fns.destroy_device)(self.handle, std::ptr::null());
         }
     }
+}
+
+/// Остальная таблица device-level функций — отдельной функцией, а не
+/// литералом в `Device::new`, ради корректной уборки на ошибке: см.
+/// комментарий на месте вызова
+fn load_device_fns(
+    get_device_proc_addr: PfnGetDeviceProcAddr,
+    handle: VkDevice,
+    destroy_device: PfnDestroyDevice,
+) -> Result<DeviceFns, String> {
+    Ok(DeviceFns {
+        destroy_device,
+        get_device_queue: vk_load_device!(get_device_proc_addr, handle, "vkGetDeviceQueue", PfnGetDeviceQueue),
+        create_swapchain_khr: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateSwapchainKHR",
+            PfnCreateSwapchainKHR
+        ),
+        destroy_swapchain_khr: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroySwapchainKHR",
+            PfnDestroySwapchainKHR
+        ),
+        get_swapchain_images_khr: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkGetSwapchainImagesKHR",
+            PfnGetSwapchainImagesKHR
+        ),
+        acquire_next_image_khr: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkAcquireNextImageKHR",
+            PfnAcquireNextImageKHR
+        ),
+        queue_present_khr: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkQueuePresentKHR",
+            PfnQueuePresentKHR
+        ),
+        create_image_view: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateImageView",
+            PfnCreateImageView
+        ),
+        destroy_image_view: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroyImageView",
+            PfnDestroyImageView
+        ),
+        create_shader_module: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateShaderModule",
+            PfnCreateShaderModule
+        ),
+        destroy_shader_module: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroyShaderModule",
+            PfnDestroyShaderModule
+        ),
+        create_render_pass: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateRenderPass",
+            PfnCreateRenderPass
+        ),
+        destroy_render_pass: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroyRenderPass",
+            PfnDestroyRenderPass
+        ),
+        create_pipeline_layout: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreatePipelineLayout",
+            PfnCreatePipelineLayout
+        ),
+        destroy_pipeline_layout: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroyPipelineLayout",
+            PfnDestroyPipelineLayout
+        ),
+        create_graphics_pipelines: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateGraphicsPipelines",
+            PfnCreateGraphicsPipelines
+        ),
+        destroy_pipeline: vk_load_device!(get_device_proc_addr, handle, "vkDestroyPipeline", PfnDestroyPipeline),
+        create_framebuffer: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateFramebuffer",
+            PfnCreateFramebuffer
+        ),
+        destroy_framebuffer: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroyFramebuffer",
+            PfnDestroyFramebuffer
+        ),
+        create_command_pool: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateCommandPool",
+            PfnCreateCommandPool
+        ),
+        destroy_command_pool: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroyCommandPool",
+            PfnDestroyCommandPool
+        ),
+        allocate_command_buffers: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkAllocateCommandBuffers",
+            PfnAllocateCommandBuffers
+        ),
+        free_command_buffers: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkFreeCommandBuffers",
+            PfnFreeCommandBuffers
+        ),
+        begin_command_buffer: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkBeginCommandBuffer",
+            PfnBeginCommandBuffer
+        ),
+        end_command_buffer: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkEndCommandBuffer",
+            PfnEndCommandBuffer
+        ),
+        reset_command_buffer: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkResetCommandBuffer",
+            PfnResetCommandBuffer
+        ),
+        cmd_begin_render_pass: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdBeginRenderPass",
+            PfnCmdBeginRenderPass
+        ),
+        cmd_end_render_pass: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdEndRenderPass",
+            PfnCmdEndRenderPass
+        ),
+        cmd_bind_pipeline: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdBindPipeline",
+            PfnCmdBindPipeline
+        ),
+        cmd_set_viewport: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdSetViewport",
+            PfnCmdSetViewport
+        ),
+        cmd_set_scissor: vk_load_device!(get_device_proc_addr, handle, "vkCmdSetScissor", PfnCmdSetScissor),
+        cmd_draw: vk_load_device!(get_device_proc_addr, handle, "vkCmdDraw", PfnCmdDraw),
+        create_semaphore: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateSemaphore",
+            PfnCreateSemaphore
+        ),
+        destroy_semaphore: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroySemaphore",
+            PfnDestroySemaphore
+        ),
+        create_fence: vk_load_device!(get_device_proc_addr, handle, "vkCreateFence", PfnCreateFence),
+        destroy_fence: vk_load_device!(get_device_proc_addr, handle, "vkDestroyFence", PfnDestroyFence),
+        wait_for_fences: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkWaitForFences",
+            PfnWaitForFences
+        ),
+        reset_fences: vk_load_device!(get_device_proc_addr, handle, "vkResetFences", PfnResetFences),
+        queue_submit: vk_load_device!(get_device_proc_addr, handle, "vkQueueSubmit", PfnQueueSubmit),
+        device_wait_idle: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDeviceWaitIdle",
+            PfnDeviceWaitIdle
+        ),
+        create_buffer: vk_load_device!(get_device_proc_addr, handle, "vkCreateBuffer", PfnCreateBuffer),
+        destroy_buffer: vk_load_device!(get_device_proc_addr, handle, "vkDestroyBuffer", PfnDestroyBuffer),
+        get_buffer_memory_requirements: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkGetBufferMemoryRequirements",
+            PfnGetBufferMemoryRequirements
+        ),
+        allocate_memory: vk_load_device!(get_device_proc_addr, handle, "vkAllocateMemory", PfnAllocateMemory),
+        free_memory: vk_load_device!(get_device_proc_addr, handle, "vkFreeMemory", PfnFreeMemory),
+        bind_buffer_memory: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkBindBufferMemory",
+            PfnBindBufferMemory
+        ),
+        map_memory: vk_load_device!(get_device_proc_addr, handle, "vkMapMemory", PfnMapMemory),
+        unmap_memory: vk_load_device!(get_device_proc_addr, handle, "vkUnmapMemory", PfnUnmapMemory),
+        cmd_bind_vertex_buffers: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdBindVertexBuffers",
+            PfnCmdBindVertexBuffers
+        ),
+        cmd_bind_index_buffer: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdBindIndexBuffer",
+            PfnCmdBindIndexBuffer
+        ),
+        cmd_push_constants: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdPushConstants",
+            PfnCmdPushConstants
+        ),
+        cmd_draw_indexed: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdDrawIndexed",
+            PfnCmdDrawIndexed
+        ),
+        create_image: vk_load_device!(get_device_proc_addr, handle, "vkCreateImage", PfnCreateImage),
+        destroy_image: vk_load_device!(get_device_proc_addr, handle, "vkDestroyImage", PfnDestroyImage),
+        get_image_memory_requirements: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkGetImageMemoryRequirements",
+            PfnGetImageMemoryRequirements
+        ),
+        bind_image_memory: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkBindImageMemory",
+            PfnBindImageMemory
+        ),
+        create_sampler: vk_load_device!(get_device_proc_addr, handle, "vkCreateSampler", PfnCreateSampler),
+        destroy_sampler: vk_load_device!(get_device_proc_addr, handle, "vkDestroySampler", PfnDestroySampler),
+        create_descriptor_set_layout: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateDescriptorSetLayout",
+            PfnCreateDescriptorSetLayout
+        ),
+        destroy_descriptor_set_layout: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroyDescriptorSetLayout",
+            PfnDestroyDescriptorSetLayout
+        ),
+        create_descriptor_pool: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCreateDescriptorPool",
+            PfnCreateDescriptorPool
+        ),
+        destroy_descriptor_pool: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkDestroyDescriptorPool",
+            PfnDestroyDescriptorPool
+        ),
+        allocate_descriptor_sets: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkAllocateDescriptorSets",
+            PfnAllocateDescriptorSets
+        ),
+        update_descriptor_sets: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkUpdateDescriptorSets",
+            PfnUpdateDescriptorSets
+        ),
+        cmd_pipeline_barrier: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdPipelineBarrier",
+            PfnCmdPipelineBarrier
+        ),
+        cmd_copy_buffer_to_image: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdCopyBufferToImage",
+            PfnCmdCopyBufferToImage
+        ),
+        cmd_bind_descriptor_sets: vk_load_device!(
+            get_device_proc_addr,
+            handle,
+            "vkCmdBindDescriptorSets",
+            PfnCmdBindDescriptorSets
+        ),
+        queue_wait_idle: vk_load_device!(get_device_proc_addr, handle, "vkQueueWaitIdle", PfnQueueWaitIdle),
+    })
 }
 
 /// Перебирает физические устройства и берёт первое, у которого нашлось

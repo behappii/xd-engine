@@ -2,9 +2,8 @@
 //! таблица функций уровня instance, которые сам Vulkan требует доставать
 //! через `vkGetInstanceProcAddr`, а не звать напрямую (см. `loader.rs`).
 
-use crate::vk_load;
 use crate::vulkan::ffi::*;
-use crate::vulkan::loader::{Library, PfnVoidFunction};
+use crate::vulkan::loader::{Library, PfnVoidFunction, vk_load};
 use std::ffi::{CStr, CString, c_void};
 use std::os::raw::c_char;
 
@@ -120,53 +119,27 @@ impl Instance {
             return Err(format!("vkCreateInstance вернул {result}"));
         }
 
-        let fns = InstanceFns {
-            destroy_instance: vk_load!(lib, handle, "vkDestroyInstance", PfnDestroyInstance),
-            enumerate_physical_devices: vk_load!(
-                lib,
-                handle,
-                "vkEnumeratePhysicalDevices",
-                PfnEnumeratePhysicalDevices
-            ),
-            get_physical_device_queue_family_properties: vk_load!(
-                lib,
-                handle,
-                "vkGetPhysicalDeviceQueueFamilyProperties",
-                PfnGetPhysicalDeviceQueueFamilyProperties
-            ),
-            get_physical_device_surface_support_khr: vk_load!(
-                lib,
-                handle,
-                "vkGetPhysicalDeviceSurfaceSupportKHR",
-                PfnGetPhysicalDeviceSurfaceSupportKHR
-            ),
-            get_physical_device_surface_capabilities_khr: vk_load!(
-                lib,
-                handle,
-                "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
-                PfnGetPhysicalDeviceSurfaceCapabilitiesKHR
-            ),
-            get_physical_device_surface_formats_khr: vk_load!(
-                lib,
-                handle,
-                "vkGetPhysicalDeviceSurfaceFormatsKHR",
-                PfnGetPhysicalDeviceSurfaceFormatsKHR
-            ),
-            get_physical_device_surface_present_modes_khr: vk_load!(
-                lib,
-                handle,
-                "vkGetPhysicalDeviceSurfacePresentModesKHR",
-                PfnGetPhysicalDeviceSurfacePresentModesKHR
-            ),
-            create_device: vk_load!(lib, handle, "vkCreateDevice", PfnCreateDevice),
-            get_device_proc_addr: vk_load!(lib, handle, "vkGetDeviceProcAddr", PfnGetDeviceProcAddr),
-            destroy_surface_khr: vk_load!(lib, handle, "vkDestroySurfaceKHR", PfnDestroySurfaceKHR),
-            get_physical_device_memory_properties: vk_load!(
-                lib,
-                handle,
-                "vkGetPhysicalDeviceMemoryProperties",
-                PfnGetPhysicalDeviceMemoryProperties
-            ),
+        // `vkDestroyInstance` достаётся ПЕРВЫМ и отдельно от остальной
+        // таблицы: с этого момента у нас есть чем убрать уже созданный
+        // instance, если не найдётся любая следующая функция. Раньше вся
+        // таблица собиралась одним литералом, а `vk_load!` внутри делает
+        // `return Err` — то есть первая же ненайденная функция уносила
+        // управление из `new`, оставляя живой `VkInstance` навсегда.
+        //
+        // Обойти самый первый случай нечем: если не нашлась сама
+        // `vkDestroyInstance`, уничтожать instance попросту некому. Но это
+        // и не потеря — библиотека без `vkDestroyInstance` не Vulkan вовсе,
+        // и такой процесс всё равно сейчас же завершится ошибкой
+        let destroy_instance: PfnDestroyInstance =
+            vk_load!(lib, handle, "vkDestroyInstance", PfnDestroyInstance);
+        let fns = match load_instance_fns(lib, handle, destroy_instance) {
+            Ok(fns) => fns,
+            Err(err) => {
+                unsafe {
+                    destroy_instance(handle, std::ptr::null());
+                }
+                return Err(err);
+            }
         };
 
         Ok(Self { handle, fns })
@@ -183,6 +156,66 @@ impl Drop for Instance {
             (self.fns.destroy_instance)(self.handle, std::ptr::null());
         }
     }
+}
+
+/// Остальная таблица функций уровня instance — отдельной функцией, а не
+/// литералом прямо в `Instance::new`, ровно ради корректной уборки: `vk_load!`
+/// на неудаче делает `return Err`, и пока всё это лежало в `new`, такой выход
+/// пропускал уничтожение уже созданного `VkInstance`. Здесь ранний выход
+/// возвращает управление вызывающей стороне, которой есть чем прибраться
+fn load_instance_fns(
+    lib: &Library,
+    handle: VkInstance,
+    destroy_instance: PfnDestroyInstance,
+) -> Result<InstanceFns, String> {
+    Ok(InstanceFns {
+        destroy_instance,
+        enumerate_physical_devices: vk_load!(
+            lib,
+            handle,
+            "vkEnumeratePhysicalDevices",
+            PfnEnumeratePhysicalDevices
+        ),
+        get_physical_device_queue_family_properties: vk_load!(
+            lib,
+            handle,
+            "vkGetPhysicalDeviceQueueFamilyProperties",
+            PfnGetPhysicalDeviceQueueFamilyProperties
+        ),
+        get_physical_device_surface_support_khr: vk_load!(
+            lib,
+            handle,
+            "vkGetPhysicalDeviceSurfaceSupportKHR",
+            PfnGetPhysicalDeviceSurfaceSupportKHR
+        ),
+        get_physical_device_surface_capabilities_khr: vk_load!(
+            lib,
+            handle,
+            "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+            PfnGetPhysicalDeviceSurfaceCapabilitiesKHR
+        ),
+        get_physical_device_surface_formats_khr: vk_load!(
+            lib,
+            handle,
+            "vkGetPhysicalDeviceSurfaceFormatsKHR",
+            PfnGetPhysicalDeviceSurfaceFormatsKHR
+        ),
+        get_physical_device_surface_present_modes_khr: vk_load!(
+            lib,
+            handle,
+            "vkGetPhysicalDeviceSurfacePresentModesKHR",
+            PfnGetPhysicalDeviceSurfacePresentModesKHR
+        ),
+        create_device: vk_load!(lib, handle, "vkCreateDevice", PfnCreateDevice),
+        get_device_proc_addr: vk_load!(lib, handle, "vkGetDeviceProcAddr", PfnGetDeviceProcAddr),
+        destroy_surface_khr: vk_load!(lib, handle, "vkDestroySurfaceKHR", PfnDestroySurfaceKHR),
+        get_physical_device_memory_properties: vk_load!(
+            lib,
+            handle,
+            "vkGetPhysicalDeviceMemoryProperties",
+            PfnGetPhysicalDeviceMemoryProperties
+        ),
+    })
 }
 
 /// Проверяет, стоит ли на машине слой валидации, не полагаясь на удачу:

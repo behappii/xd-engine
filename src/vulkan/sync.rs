@@ -45,6 +45,13 @@ impl FrameSync {
             (device.fns.create_semaphore)(device.handle, &semaphore_info, std::ptr::null(), &mut render_finished)
         };
         if result != VK_SUCCESS {
+            // Разматываем то, что уже создано: у Vulkan нет деструкторов, и
+            // ранний выход отсюда — единственное место, где первый семафор
+            // мог бы остаться висеть до конца процесса. Тот же порядок
+            // уборки, что уже принят в `buffer.rs`/`image.rs`/`depth.rs`
+            unsafe {
+                (device.fns.destroy_semaphore)(device.handle, image_available, std::ptr::null());
+            }
             return Err(format!("vkCreateSemaphore (render_finished) вернул {result}"));
         }
 
@@ -60,6 +67,10 @@ impl FrameSync {
         let mut in_flight = VkFence::NULL;
         let result = unsafe { (device.fns.create_fence)(device.handle, &fence_info, std::ptr::null(), &mut in_flight) };
         if result != VK_SUCCESS {
+            unsafe {
+                (device.fns.destroy_semaphore)(device.handle, render_finished, std::ptr::null());
+                (device.fns.destroy_semaphore)(device.handle, image_available, std::ptr::null());
+            }
             return Err(format!("vkCreateFence вернул {result}"));
         }
 
