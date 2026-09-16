@@ -170,7 +170,31 @@ impl VulkanRenderer {
         // сразу заводится только белая заглушка 1x1 для инстансов без
         // текстуры (см. `gpu_assets`). Командный пул нужен ей для той же
         // одноразовой заливки, что и любой другой картинке
-        let gpu_assets = GpuAssets::new(&device, &memory_properties, command_pool, descriptor_set_layout)?;
+        // Умеет ли формат текстур фильтровать линейно. Спецификация этого не
+        // обещает: `R8G8B8A8_UNORM` обязателен к поддержке как текстура, но
+        // линейная фильтрация — отдельная возможность, и требует её не только
+        // сэмплер, а ещё и БЛИТ, которым строится мип-пирамида. Спрашиваем
+        // один раз: ответ зависит только от устройства и формата
+        let mut format_properties = VkFormatProperties::default();
+        unsafe {
+            (instance.fns.get_physical_device_format_properties)(
+                device.physical,
+                VK_FORMAT_R8G8B8A8_UNORM,
+                &mut format_properties,
+            );
+        }
+        // `optimal`, а не `linear`: картинки текстур лежат в `OPTIMAL`-тайлинге
+        // (см. `image.rs` — почему именно в нём)
+        let linear_blit =
+            format_properties.optimal_tiling_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT != 0;
+        if !linear_blit {
+            eprintln!(
+                "xd_engine: устройство не умеет линейную фильтрацию для формата текстур — мип-пирамида не строится"
+            );
+        }
+
+        let gpu_assets =
+            GpuAssets::new(&device, &memory_properties, command_pool, descriptor_set_layout, linear_blit)?;
 
         Ok(Self {
             lib,

@@ -135,6 +135,20 @@ type PfnCmdPipelineBarrier = unsafe extern "system" fn(
     u32,
     *const VkImageMemoryBarrier,
 );
+/// `vkCmdBlitImage` — копия с РАСТЯГИВАНИЕМ, в отличие от `vkCmdCopyImage`,
+/// который требует совпадающих размеров. Именно растягивание и строит
+/// мип-пирамиду: каждый следующий уровень — это предыдущий, ужатый вдвое
+/// фильтром самой видеокарты (`image::generate_mipmaps`)
+type PfnCmdBlitImage = unsafe extern "system" fn(
+    VkCommandBuffer,
+    VkImage,
+    VkEnum,
+    VkImage,
+    VkEnum,
+    u32,
+    *const VkImageBlit,
+    VkEnum,
+);
 type PfnCmdCopyBufferToImage =
     unsafe extern "system" fn(VkCommandBuffer, VkBuffer, VkImage, VkEnum, u32, *const VkBufferImageCopy);
 type PfnCmdBindDescriptorSets = unsafe extern "system" fn(
@@ -220,6 +234,7 @@ pub struct DeviceFns {
     pub allocate_descriptor_sets: PfnAllocateDescriptorSets,
     pub update_descriptor_sets: PfnUpdateDescriptorSets,
     pub cmd_pipeline_barrier: PfnCmdPipelineBarrier,
+    pub cmd_blit_image: PfnCmdBlitImage,
     pub cmd_copy_buffer_to_image: PfnCmdCopyBufferToImage,
     pub cmd_bind_descriptor_sets: PfnCmdBindDescriptorSets,
     pub queue_wait_idle: PfnQueueWaitIdle,
@@ -639,7 +654,8 @@ fn load_device_fns(
             "vkCmdPipelineBarrier",
             PfnCmdPipelineBarrier
         ),
-        cmd_copy_buffer_to_image: vk_load_device!(
+        cmd_blit_image: vk_load_device!(get_device_proc_addr, handle, "vkCmdBlitImage", PfnCmdBlitImage),
+    cmd_copy_buffer_to_image: vk_load_device!(
             get_device_proc_addr,
             handle,
             "vkCmdCopyBufferToImage",

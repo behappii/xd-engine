@@ -32,7 +32,7 @@ use crate::vulkan::buffer::{self, Buffer};
 use crate::vulkan::descriptor;
 use crate::vulkan::device::Device;
 use crate::vulkan::ffi::*;
-use crate::vulkan::image::GpuImage;
+use crate::vulkan::image::{self, GpuImage};
 use crate::vulkan::pipeline::GpuVertex;
 use crate::vulkan::sampler;
 
@@ -72,6 +72,12 @@ pub struct GpuAssets {
     white: GpuTexture,
     pool: VkDescriptorPool,
     set_layout: VkDescriptorSetLayout,
+    /// Умеет ли формат текстур блититься с линейной фильтрацией. Если нет —
+    /// пирамиду не строим вовсе: блит ближайшим соседом дал бы уровни, на
+    /// которых рябь никуда не делась, то есть плату памятью без выигрыша.
+    /// Спрашивается один раз, в `context.rs`, — ответ зависит только от
+    /// устройства и формата, и меняться ему неоткуда
+    linear_blit: bool,
 }
 
 impl GpuAssets {
@@ -82,6 +88,7 @@ impl GpuAssets {
         memory_properties: &VkPhysicalDeviceMemoryProperties,
         command_pool: VkCommandPool,
         set_layout: VkDescriptorSetLayout,
+        linear_blit: bool,
     ) -> Result<Self, String> {
         // Белый тексель, а не «отсутствие текстуры»: фрагментный шейдер
         // множит тексель на цвет покомпонентно, и белый — тождественная
@@ -89,8 +96,9 @@ impl GpuAssets {
         // его»). Инстанс без текстуры получает эту заглушку и проходит тем же
         // единственным путём — без ветки в шейдере, без второго пайплайна и
         // без второго дескриптор-лейаута
-        let image = GpuImage::upload_rgba8(device, memory_properties, command_pool, 1, 1, &[255, 255, 255, 255])?;
-        let sampler = match sampler::create(device, Magnify::Nearest, Minify::Nearest) {
+        // Уровень ровно один: у картинки 1x1 пирамида вырождается в неё же
+        let image = GpuImage::upload_rgba8(device, memory_properties, command_pool, 1, 1, &[255, 255, 255, 255], 1)?;
+        let sampler = match sampler::create(device, Magnify::Nearest, Minify::Nearest, 1) {
             Ok(sampler) => sampler,
             Err(err) => {
                 image.destroy(device);
@@ -104,6 +112,7 @@ impl GpuAssets {
             white: GpuTexture { image, sampler, set: VkDescriptorSet::NULL },
             pool: VkDescriptorPool::NULL,
             set_layout,
+            linear_blit,
         };
 
         if let Err(err) = assets.rebuild_descriptors(device) {
@@ -137,6 +146,17 @@ impl GpuAssets {
         }
 
         for texture in new_textures {
+            // Пирамида строится только тем, кто её просит, — ровно как на
+            // CPU-пути (`Assets::add_texture`): отладочной шахматке или
+            // атласу интерфейса она стоила бы трети лишней памяти впустую.
+            // Второе условие про устройство: без линейного блита строить
+            // нечем, см. поле `linear_blit`
+            let mip_levels = if self.linear_blit && texture.minify().wants_mipmaps() {
+                image::mip_level_count(texture.width(), texture.height())
+            } else {
+                1
+            };
+
             let pixels = texture.level0_rgba8();
             let image = GpuImage::upload_rgba8(
                 device,
@@ -145,8 +165,9 @@ impl GpuAssets {
                 texture.width(),
                 texture.height(),
                 &pixels,
+                mip_levels,
             )?;
-            let sampler = match sampler::create(device, texture.magnify(), texture.minify()) {
+            let sampler = match sampler::create(device, texture.magnify(), texture.minify(), image.mip_levels) {
                 Ok(sampler) => sampler,
                 Err(err) => {
                     image.destroy(device);

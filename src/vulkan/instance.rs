@@ -79,6 +79,11 @@ type PfnCreateDevice =
     unsafe extern "system" fn(VkPhysicalDevice, *const VkDeviceCreateInfo, *const c_void, *mut VkDevice) -> VkEnum;
 pub type PfnGetDeviceProcAddr = unsafe extern "system" fn(VkDevice, *const c_char) -> Option<PfnVoidFunction>;
 type PfnDestroySurfaceKHR = unsafe extern "system" fn(VkInstance, VkSurfaceKHR, *const c_void);
+/// Что умеет конкретный формат на этом устройстве. Нужен ровно одному
+/// вопросу: можно ли блитить с линейной фильтрацией, то есть строить
+/// мип-пирамиду силами GPU (см. `gpu_assets`)
+type PfnGetPhysicalDeviceFormatProperties =
+    unsafe extern "system" fn(VkPhysicalDevice, VkEnum, *mut VkFormatProperties);
 type PfnGetPhysicalDeviceMemoryProperties =
     unsafe extern "system" fn(VkPhysicalDevice, *mut VkPhysicalDeviceMemoryProperties);
 
@@ -99,6 +104,7 @@ pub struct InstanceFns {
     pub get_device_proc_addr: PfnGetDeviceProcAddr,
     pub destroy_surface_khr: PfnDestroySurfaceKHR,
     pub get_physical_device_memory_properties: PfnGetPhysicalDeviceMemoryProperties,
+    pub get_physical_device_format_properties: PfnGetPhysicalDeviceFormatProperties,
     pub enumerate_device_extension_properties: PfnEnumerateDeviceExtensionProperties,
 }
 
@@ -291,6 +297,12 @@ fn load_instance_fns(
             handle,
             "vkGetPhysicalDeviceMemoryProperties",
             PfnGetPhysicalDeviceMemoryProperties
+        ),
+        get_physical_device_format_properties: vk_load!(
+            lib,
+            handle,
+            "vkGetPhysicalDeviceFormatProperties",
+            PfnGetPhysicalDeviceFormatProperties
         ),
         enumerate_device_extension_properties: vk_load!(
             lib,

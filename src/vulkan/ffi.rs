@@ -1180,3 +1180,44 @@ pub struct VkPipelineDepthStencilStateCreateInfo {
     pub min_depth_bounds: f32,
     pub max_depth_bounds: f32,
 }
+
+// ============================================================================
+// Мип-пирамида: блиты между уровнями одной картинки
+// ============================================================================
+
+/// Раскладка `TRANSFER_SRC_OPTIMAL` — читать из картинки командой копирования.
+/// Пара к уже заведённой `TRANSFER_DST_OPTIMAL`: при построении пирамиды одна
+/// и та же картинка побывает в обеих, только разными уровнями одновременно
+pub const VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: VkEnum = 6;
+pub const VK_ACCESS_TRANSFER_READ_BIT: VkFlags = 0x0000_0800;
+
+/// Умеет ли формат фильтроваться линейно при выборке — и, что здесь важнее,
+/// при БЛИТЕ с `VK_FILTER_LINEAR`. Спецификация требует этой возможности
+/// именно у формата-ИСТОЧНИКА блита, и гарантий на неё нет никаких: формат
+/// обязателен к поддержке как текстура, но не обязан поддерживать линейную
+/// фильтрацию. Отсюда проверка перед построением пирамиды (`gpu_assets`)
+pub const VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT: VkFlags = 0x0000_1000;
+
+/// Что умеет формат при разных способах хранения. Нас интересует
+/// `optimal_tiling_features`: картинки текстур лежат именно в `OPTIMAL`
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VkFormatProperties {
+    pub linear_tiling_features: VkFlags,
+    pub optimal_tiling_features: VkFlags,
+    pub buffer_features: VkFlags,
+}
+
+/// Один прямоугольник блита. По паре `VkOffset3D` с каждой стороны — это не
+/// «позиция и размер», а ДВА УГЛА области, и растягивание задаётся именно их
+/// разницей: источник вдвое больше приёмника — картинка ужимается вдвое.
+/// Третья координата у плоской картинки всегда `z: 0` и `z: 1`, то есть один
+/// слой толщиной в единицу, а не ноль
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkImageBlit {
+    pub src_subresource: VkImageSubresourceLayers,
+    pub src_offsets: [VkOffset3D; 2],
+    pub dst_subresource: VkImageSubresourceLayers,
+    pub dst_offsets: [VkOffset3D; 2],
+}
