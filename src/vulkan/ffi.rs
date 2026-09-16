@@ -1221,3 +1221,104 @@ pub struct VkImageBlit {
     pub dst_subresource: VkImageSubresourceLayers,
     pub dst_offsets: [VkOffset3D; 2],
 }
+
+// ============================================================================
+// Возможности устройства: анизотропная фильтрация
+// ============================================================================
+
+/// Что устройство умеет сверх обязательного минимума — 55 флагов подряд.
+///
+/// **Эта структура НЕ воспроизведена по памяти, в отличие от остального
+/// файла, и это важно.** Порядок полей сгенерирован из вывода `vulkaninfo`,
+/// то есть взят у самого драйвера, а не из головы. Причина — поимка на месте:
+/// по памяти первым полем здесь было `fullDrawIndexUint32`, а на деле первым
+/// идёт `robustBufferAccess`. Весь список сдвигался на одно поле, и
+/// `samplerAnisotropy` оказывался на индексе 18, где на самом деле лежит
+/// `multiViewport`. Хуже всего то, что на этой машине оба флага `true` —
+/// чтение выглядело бы безупречно, а при создании устройства мы включили бы
+/// НЕ ТУ возможность, и первый же сэмплер с анизотропией получил бы ошибку
+/// валидации про невключённую фичу.
+///
+/// Сверено у обоих драйверов системы (MoltenVK и KosmicKrisp): 55 полей,
+/// порядок одинаковый. Размер сторожит проверка на этапе компиляции ниже —
+/// лишнее или потерянное поле не соберётся вовсе.
+///
+/// Используется в обе стороны, и в обе стороны размер критичен: драйвер
+/// ПИШЕТ сюда ровно 220 байт в `vkGetPhysicalDeviceFeatures` и ЧИТАЕТ ровно
+/// 220 из `VkDeviceCreateInfo::pEnabledFeatures`. Структура покороче — это
+/// запись за её конец, то есть порча соседней памяти без единого сообщения
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VkPhysicalDeviceFeatures {
+    pub robust_buffer_access: VkBool32,
+    pub full_draw_index_uint32: VkBool32,
+    pub image_cube_array: VkBool32,
+    pub independent_blend: VkBool32,
+    pub geometry_shader: VkBool32,
+    pub tessellation_shader: VkBool32,
+    pub sample_rate_shading: VkBool32,
+    pub dual_src_blend: VkBool32,
+    pub logic_op: VkBool32,
+    pub multi_draw_indirect: VkBool32,
+    pub draw_indirect_first_instance: VkBool32,
+    pub depth_clamp: VkBool32,
+    pub depth_bias_clamp: VkBool32,
+    pub fill_mode_non_solid: VkBool32,
+    pub depth_bounds: VkBool32,
+    pub wide_lines: VkBool32,
+    pub large_points: VkBool32,
+    pub alpha_to_one: VkBool32,
+    pub multi_viewport: VkBool32,
+    pub sampler_anisotropy: VkBool32,
+    pub texture_compression_etc2: VkBool32,
+    pub texture_compression_astc_ldr: VkBool32,
+    pub texture_compression_bc: VkBool32,
+    pub occlusion_query_precise: VkBool32,
+    pub pipeline_statistics_query: VkBool32,
+    pub vertex_pipeline_stores_and_atomics: VkBool32,
+    pub fragment_stores_and_atomics: VkBool32,
+    pub shader_tessellation_and_geometry_point_size: VkBool32,
+    pub shader_image_gather_extended: VkBool32,
+    pub shader_storage_image_extended_formats: VkBool32,
+    pub shader_storage_image_multisample: VkBool32,
+    pub shader_storage_image_read_without_format: VkBool32,
+    pub shader_storage_image_write_without_format: VkBool32,
+    pub shader_uniform_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_sampled_image_array_dynamic_indexing: VkBool32,
+    pub shader_storage_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_storage_image_array_dynamic_indexing: VkBool32,
+    pub shader_clip_distance: VkBool32,
+    pub shader_cull_distance: VkBool32,
+    pub shader_float64: VkBool32,
+    pub shader_int64: VkBool32,
+    pub shader_int16: VkBool32,
+    pub shader_resource_residency: VkBool32,
+    pub shader_resource_min_lod: VkBool32,
+    pub sparse_binding: VkBool32,
+    pub sparse_residency_buffer: VkBool32,
+    pub sparse_residency_image2_d: VkBool32,
+    pub sparse_residency_image3_d: VkBool32,
+    pub sparse_residency2_samples: VkBool32,
+    pub sparse_residency4_samples: VkBool32,
+    pub sparse_residency8_samples: VkBool32,
+    pub sparse_residency16_samples: VkBool32,
+    pub sparse_residency_aliased: VkBool32,
+    pub variable_multisample_rate: VkBool32,
+    pub inherited_queries: VkBool32,
+}
+
+// 55 полей по четыре байта, без выравнивающих дыр: все поля одного типа
+const _: () = assert!(std::mem::size_of::<VkPhysicalDeviceFeatures>() == 55 * 4);
+
+/// Нижняя граница `maxSamplerAnisotropy`, гарантированная спецификацией для
+/// ЛЮБОГО устройства, у которого есть `samplerAnisotropy`.
+///
+/// Ради неё не заводится `VkPhysicalDeviceLimits` — структура из сотни полей
+/// вперемешку `u32`, `f32`, `u64` и массивов, где смещение нужного поля
+/// зависит от выравнивания всего, что стоит перед ним. Спрашивать её, чтобы
+/// узнать предел, который и так гарантирован не ниже 16, — значит купить
+/// огромный риск ради того, чего не используешь: потолок выборок у
+/// `Minify::Anisotropic` на CPU-пути и так выше 16 почти не ставят (замер в
+/// CLAUDE.md: ×8 и ×16 по цене неотличимы). У обоих драйверов этой системы
+/// `vulkaninfo` показывает ровно 16
+pub const VK_MIN_MAX_SAMPLER_ANISOTROPY: f32 = 16.0;

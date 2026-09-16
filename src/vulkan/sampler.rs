@@ -9,12 +9,13 @@
 //! соседние уровни (`mipmap_mode`). Оба обязаны согласоваться с картинкой,
 //! потому что проверять это некому — см. `create`.
 //!
-//! **А вот анизотропии по-прежнему нет.** `Minify::Anisotropic` здесь
-//! вырождается в трилинейную фильтрацию: уровни читаются, но одной выборкой
-//! вместо нескольких вдоль длинной стороны отпечатка. Включить её мало —
-//! `anisotropyEnable` требует фичи устройства `samplerAnisotropy`, её надо
-//! запросить при создании устройства, а потолок взять из
-//! `limits.maxSamplerAnisotropy`. Это следующий шаг, а не забытая строка
+//! **Анизотропию тоже.** `Minify::Anisotropic { max_samples }` включает
+//! `anisotropyEnable` с потолком `max_samples` — если устройство её умеет и
+//! она включена при его создании (`Device::sampler_anisotropy`). Сама
+//! математика — уровень по короткой стороне, выборки вдоль длинной — на CPU
+//! расписана в `texture.rs`; здесь её делает драйвер, и это тот самый случай,
+//! когда разобранный руками алгоритм на видеокарте сворачивается в одно поле
+//! структуры
 
 use crate::texture::{Magnify, Minify};
 use crate::vulkan::device::Device;
@@ -39,6 +40,28 @@ pub fn create(device: &Device, magnify: Magnify, minify: Minify, mip_levels: u32
     let min_filter = match minify {
         Minify::Nearest => VK_FILTER_NEAREST,
         Minify::Linear | Minify::Mipmapped | Minify::Anisotropic { .. } => VK_FILTER_LINEAR,
+    };
+
+    // Анизотропия — только если её попросили И если устройство её включило.
+    // Второе условие не формальность: сэмплер с `anisotropyEnable` на
+    // устройстве без включённой фичи — ошибка валидации, даже если сама
+    // видеокарта анизотропию умеет (см. `Device::sampler_anisotropy`). Без
+    // неё текстура остаётся трилинейной, то есть получает всё, что умеет
+    // пирамида, и теряет только выборки вдоль длинной стороны.
+    //
+    // `max_samples` меньше двух — не анизотропия вовсе, ровно как на CPU-пути
+    // («ноль и единица означают одно и то же»): одна выборка вдоль отпечатка
+    // и есть обычная трилинейная фильтрация, включать ради неё фичу незачем.
+    //
+    // Потолок зажимается гарантированным минимумом спецификации, а не
+    // спрошенным у устройства пределом — почему, см.
+    // `VK_MIN_MAX_SAMPLER_ANISOTROPY` в `ffi.rs`. Больше шестнадцати выборок
+    // на этой машине и так не даёт ни один из драйверов
+    let (anisotropy_enable, max_anisotropy) = match minify {
+        Minify::Anisotropic { max_samples } if device.sampler_anisotropy && max_samples > 1 => {
+            (VK_TRUE, (max_samples as f32).min(VK_MIN_MAX_SAMPLER_ANISOTROPY))
+        }
+        _ => (VK_FALSE, 1.0),
     };
 
     let create_info = VkSamplerCreateInfo {
@@ -68,8 +91,8 @@ pub fn create(device: &Device, magnify: Magnify, minify: Minify, mip_levels: u32
         address_mode_v: VK_SAMPLER_ADDRESS_MODE_REPEAT,
         address_mode_w: VK_SAMPLER_ADDRESS_MODE_REPEAT,
         mip_lod_bias: 0.0,
-        anisotropy_enable: VK_FALSE,
-        max_anisotropy: 1.0,
+        anisotropy_enable,
+        max_anisotropy,
         compare_enable: VK_FALSE,
         compare_op: VK_COMPARE_OP_ALWAYS,
         min_lod: 0.0,

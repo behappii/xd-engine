@@ -246,6 +246,14 @@ pub struct Device {
     pub queue: VkQueue,
     pub queue_family: u32,
     pub fns: DeviceFns,
+    /// Включена ли у ЭТОГО логического устройства анизотропная фильтрация.
+    ///
+    /// Именно «включена», а не «поддерживается»: у Vulkan это два разных
+    /// факта. Физическое устройство может уметь что угодно, но пользоваться
+    /// разрешено только тем, что попросили при `vkCreateDevice`, — сэмплер с
+    /// `anisotropyEnable` на устройстве, где фичу не включили, это ошибка
+    /// валидации даже на видеокарте, которая анизотропию прекрасно умеет
+    pub sampler_anisotropy: bool,
 }
 
 impl Device {
@@ -288,6 +296,27 @@ impl Device {
             extensions.push(portability_subset.as_ptr());
         }
 
+        // Необязательные возможности включаются ЯВНО и поштучно, и порядок
+        // тут такой: спросить, что устройство умеет, и попросить только то,
+        // чем реально пользуемся. Не всё подряд — включённая возможность у
+        // некоторых драйверов стоит памяти или скорости даже неиспользуемой,
+        // а нам из пятидесяти пяти нужна одна.
+        //
+        // Попросить отсутствующую — `VK_ERROR_FEATURE_NOT_PRESENT` и отказ
+        // создать устройство, поэтому сначала спрашиваем
+        let mut supported = VkPhysicalDeviceFeatures::default();
+        unsafe {
+            (instance.fns.get_physical_device_features)(physical, &mut supported);
+        }
+        let sampler_anisotropy = supported.sampler_anisotropy == VK_TRUE;
+
+        let enabled = VkPhysicalDeviceFeatures { sampler_anisotropy: supported.sampler_anisotropy, ..Default::default() };
+        if !sampler_anisotropy {
+            eprintln!(
+                "xd_engine: устройство не умеет анизотропную фильтрацию — Minify::Anisotropic выродится в трилинейную"
+            );
+        }
+
         let create_info = VkDeviceCreateInfo {
             s_type: VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
             p_next: std::ptr::null(),
@@ -298,7 +327,10 @@ impl Device {
             pp_enabled_layer_names: std::ptr::null(),
             enabled_extension_count: extensions.len() as u32,
             pp_enabled_extension_names: extensions.as_ptr(),
-            p_enabled_features: std::ptr::null(),
+            // Указатель на ВСЮ структуру, а не на одно поле: драйвер прочитает
+            // отсюда ровно 220 байт. Отсюда и проверка размера у самого типа
+            // в `ffi.rs` — короче на поле, и чтение ушло бы за её конец
+            p_enabled_features: &enabled as *const VkPhysicalDeviceFeatures as *const std::ffi::c_void,
         };
 
         let mut handle = VkDevice::NULL;
@@ -332,7 +364,7 @@ impl Device {
             (fns.get_device_queue)(handle, queue_family, 0, &mut queue);
         }
 
-        Ok(Self { handle, physical, queue, queue_family, fns })
+        Ok(Self { handle, physical, queue, queue_family, fns, sampler_anisotropy })
     }
 }
 

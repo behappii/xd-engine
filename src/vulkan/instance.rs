@@ -84,6 +84,9 @@ type PfnDestroySurfaceKHR = unsafe extern "system" fn(VkInstance, VkSurfaceKHR, 
 /// мип-пирамиду силами GPU (см. `gpu_assets`)
 type PfnGetPhysicalDeviceFormatProperties =
     unsafe extern "system" fn(VkPhysicalDevice, VkEnum, *mut VkFormatProperties);
+/// Какие необязательные возможности у устройства есть. Нужна ради одной из
+/// них — `samplerAnisotropy` (см. `device.rs`)
+type PfnGetPhysicalDeviceFeatures = unsafe extern "system" fn(VkPhysicalDevice, *mut VkPhysicalDeviceFeatures);
 type PfnGetPhysicalDeviceMemoryProperties =
     unsafe extern "system" fn(VkPhysicalDevice, *mut VkPhysicalDeviceMemoryProperties);
 
@@ -105,6 +108,7 @@ pub struct InstanceFns {
     pub destroy_surface_khr: PfnDestroySurfaceKHR,
     pub get_physical_device_memory_properties: PfnGetPhysicalDeviceMemoryProperties,
     pub get_physical_device_format_properties: PfnGetPhysicalDeviceFormatProperties,
+    pub get_physical_device_features: PfnGetPhysicalDeviceFeatures,
     pub enumerate_device_extension_properties: PfnEnumerateDeviceExtensionProperties,
 }
 
@@ -297,6 +301,12 @@ fn load_instance_fns(
             handle,
             "vkGetPhysicalDeviceMemoryProperties",
             PfnGetPhysicalDeviceMemoryProperties
+        ),
+        get_physical_device_features: vk_load!(
+            lib,
+            handle,
+            "vkGetPhysicalDeviceFeatures",
+            PfnGetPhysicalDeviceFeatures
         ),
         get_physical_device_format_properties: vk_load!(
             lib,
